@@ -10,7 +10,7 @@ def print_hi(name):
 
 def print_thi(name):
     # 在下面的代码行中使用断点来调试脚本。
-    print(f'Hi 铁昭321, {name}')  # 按 Ctrl+F8 切换断点。
+    print(f'Hi 铁昭322, {name}')  # 按 Ctrl+F8 切换断点。
 
 def print_hello(name):
     # 在下面的代码行中使用断点来调试脚本。
