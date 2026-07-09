@@ -241,11 +241,11 @@ def init_db() -> None:
     # noqa: F401 告诉 lint 工具"这个 import 没被直接使用是有意为之的"
     import models.user     # noqa: F401  注册 sys_role / sys_user / sys_organization
     import models.crm      # noqa: F401  注册 profile_rule / customer_source / customer_profile
+    import models.report   # noqa: F401  注册 report_generation / report_schedule
 
     # ★ 后续新增模块示例（取消注释并替换为实际的模块名）:
     # import models.student   # noqa: F401
     # import models.knowledge # noqa: F401
-    # import models.report    # noqa: F401
 
     # --- 执行建表 ---
     # create_all() 会对 metadata 中每个表执行 CREATE TABLE IF NOT EXISTS

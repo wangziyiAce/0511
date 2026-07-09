@@ -1,3 +1,12 @@
+"""工具接口路由"""
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/")
+async def tools_root():
+    return {"module": "工具接口", "status": "ok"}
 """
 基础设施模块 — API 路由
 ===========================================
