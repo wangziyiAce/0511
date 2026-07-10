@@ -191,9 +191,9 @@ def calculate_channel_roi(
 
     公式：
 
-    * ``CPL = 渠道成本 / 线索数``
-    * ``CAC = 渠道成本 / 签约数``
-    * ``ROI = (实际回款 - 渠道成本) / 渠道成本``
+    * ``CPL = 渠道成本 / 线索数``(Cost Per Lead 每条有效线索成本)
+    * ``CAC = 渠道成本 / 签约数``(Customer Acquisition Cost 获取一个付费客户的成本)
+    * ``ROI = (实际回款 - 渠道成本) / 渠道成本``(Return on Investment 投资回报率)
 
     成本为 0 或数据不完整时返回 ``None``，并在 ``data_quality_warnings``
     中说明原因，避免除零和大模型估算。

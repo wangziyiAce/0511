@@ -106,6 +106,81 @@ def seed_basic_users(db: Session) -> None:
         db.commit()
 
 
+def _auto_migrate_missing_columns() -> None:
+    """为所有已存在的表自动补齐 ORM 模型中新增的列。
+
+    ``Base.metadata.create_all()`` 对已存在的表只会跳过，不会执行 ALTER。
+    开发期 ORM 字段频繁变更，这里自动对比 ORM 定义与数据库实际列，补齐缺失字段。
+
+    生产环境应使用 Alembic 等正式迁移工具代替此函数。
+    """
+
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    db_table_names = set(inspector.get_table_names())
+
+    # SQLAlchemy 类型 → MySQL DDL 的简单映射（只覆盖本项目用到的类型）
+    _TYPE_MAP = {
+        "BIGINT": "BIGINT",
+        "INTEGER": "INT",
+        "VARCHAR": "VARCHAR(255)",
+        "TEXT": "TEXT",
+        "MEDIUMTEXT": "MEDIUMTEXT",
+        "DATETIME": "DATETIME",
+        "DATE": "DATE",
+        "JSON": "JSON",
+        "DECIMAL": "DECIMAL(20,6)",
+        "TINYINT": "TINYINT",
+        "ENUM": "VARCHAR(64)",  # ENUM 新增列统一用 VARCHAR 兜底（添加新值不方便）
+    }
+
+    for table_name, table in Base.metadata.tables.items():
+        if table_name not in db_table_names:
+            continue  # 表还不存在，create_all 会处理
+
+        db_columns = {col["name"]: col for col in inspector.get_columns(table_name)}
+
+        for col in table.columns:
+            if col.name in db_columns:
+                continue
+
+            # 推导 MySQL DDL 类型
+            col_type_str = str(col.type)
+            # 提取基础类型名（如 "VARCHAR(64)" → "VARCHAR"）
+            base_type = col_type_str.split("(")[0].split()[0].upper()
+            mysql_type = _TYPE_MAP.get(base_type)
+            if mysql_type is None:
+                # 不能识别的类型，跳过（避免错误迁移）
+                continue
+
+            # nullable
+            nullable = "NULL" if col.nullable else "NOT NULL"
+
+            # default
+            default_clause = ""
+            if col.server_default is not None:
+                # server_default 是 SQL 表达式
+                default_clause = f" DEFAULT {col.server_default.arg}"
+            elif col.default is not None:
+                default_clause = f" DEFAULT {col.default.arg}"
+
+            # comment
+            comment = f" COMMENT '{col.comment}'" if col.comment else ""
+
+            sql = (
+                f"ALTER TABLE {table_name} "
+                f"ADD COLUMN {col.name} {mysql_type} {nullable}{default_clause}{comment}"
+            )
+
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(sql))
+                    conn.commit()
+            except Exception:
+                pass  # 列可能已通过其他方式添加
+
+
 def init_db() -> None:
     """注册全部 ORM 模型并创建表。
 
@@ -118,6 +193,10 @@ def init_db() -> None:
     import models.user  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+
+    # 自动补齐所有已存在表中缺失的列（开发期容错）
+    _auto_migrate_missing_columns()
+
     db = SessionLocal()
     try:
         seed_basic_users(db)
