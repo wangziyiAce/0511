@@ -148,11 +148,16 @@ DIFY_API_KEY: str = os.getenv("DIFY_API_KEY", "")
 # 六、安全配置
 # ============================================================
 # --- JWT 签名密钥 ---
-# 用于生成和验证登录 Token。修改后所有已签发的 Token 立即失效。
-# ⚠️ 默认值仅用于开发！生产环境务必:
-#    1. 生成一个随机长字符串（如 openssl rand -hex 32 的输出）
-#    2. 通过环境变量 SECRET_KEY 传入
 SECRET_KEY: str = os.getenv("SECRET_KEY", "change-me-in-production")
+
+# --- Dify 服务令牌 ---
+# 用于 Dify HTTP 节点调用 FastAPI 时的鉴权（对应 API 文档第 10 章）
+# 生成方式: python -c "import secrets; print(secrets.token_hex(32))"
+# ⚠️ 不要提交到 Git！生产环境通过环境变量覆盖
+DIFY_SERVICE_TOKEN: str = os.getenv(
+    "DIFY_SERVICE_TOKEN",
+    "d88d70a2a80921cac932aab7efdcd723b1604f175e1b3e41b6f72900d68b0598",
+)
 
 # --- 密码哈希成本因子 ---
 # bcrypt 的核心参数，控制哈希计算复杂度。

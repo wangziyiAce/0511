@@ -24,7 +24,7 @@ import os
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, Query, UploadFile
 from sqlalchemy.orm import Session
 
 # --- 公共基础 ---
@@ -33,9 +33,11 @@ from models.common import (
     ValidationError,
     get_current_user,
     success_response,
+    verify_dify_token,
 )
 
 # --- 数据模型 ---
+from models.crm import CustomerProfile, CustomerSource
 from models.user import SysUser
 
 # --- Schema ---
@@ -51,6 +53,7 @@ from schemas.crm import (
 # --- Service ---
 from services.profile_service import (
     _extract_file_content,
+    _mock_analysis_result,
     create_profile_rule,
     execute_analysis,
     get_profile_detail,
@@ -180,6 +183,128 @@ async def api_upload_customer_source(
         },
         message="资料已上传",
     )
+
+
+# ============================================================
+# 一-B、客户资料上传（JSON 版本，供 Dify HTTP 节点调用）
+# ============================================================
+
+
+@router.post("/profile/upload-json", summary="上传客户资料(JSON)", dependencies=[Depends(verify_dify_token)])
+def api_upload_customer_source_json(
+    request: dict = Body(...),  # {"content_text":"...", "source_type":"text", "file_url":null, "file_name":null}
+    db: Session = Depends(get_db),
+):
+    """
+    纯 JSON 版本的上传接口，供 Dify Chatflow HTTP 节点调用。
+
+    Dify HTTP 节点只能发送 JSON 请求体，不能发 multipart/form-data。
+    文件内容由 Dify 文档提取器处理后，以文本形式传入 content_text 字段。
+
+    请求体:
+      {"content_text": "提取的文件文本内容", "source_type": "pdf_resume", "file_url": null, "file_name": "简历.pdf"}
+    """
+    source = upload_customer_source(
+        db=db,
+        source_type=request.get("source_type", "text"),
+        operator_id=None,  # Dify 调用时无用户上下文
+        content_text=request.get("content_text"),
+        file_url=request.get("file_url"),
+        file_name=request.get("file_name"),
+    )
+    return success_response(
+        data={
+            "source_id": source.id,
+            "source_type": source.source_type,
+            "file_name": source.file_name,
+            "file_url": source.file_url,
+            "parse_status": source.parse_status,
+            "create_time": source.create_time.isoformat(),
+        },
+        message="资料已上传",
+    )
+
+
+# ============================================================
+# 三-B、同步研判（供 Dify Chatflow HTTP 节点调用，直接返回结果）
+# ============================================================
+
+
+@router.post("/profile/analyze-direct", summary="同步研判(供Dify调用)", dependencies=[Depends(verify_dify_token)])
+def api_analyze_direct(
+    request: dict = Body(...),  # {"source_id": 1, "content_text": "客户文本", "rule_content": {...}}
+    db: Session = Depends(get_db),
+):
+    """
+    同步执行客户研判，直接返回 AI 结果。供 Dify Chatflow HTTP 节点调用。
+
+    与 /profile/{source_id}/analyze 的区别：
+      - 那个是异步（BackgroundTasks + 轮询），给前端页面用
+      - 这个是同步（阻塞等待结果），给 Dify Chatflow 用（有 60s 超时）
+
+    请求体:
+      {"source_id": 1, "content_text": "...", "rule_content": {...}}
+    """
+    import json
+    from utils.dify_client import call_dify_workflow, is_dify_available
+
+    source_id = request.get("source_id")
+    content_text = request.get("content_text", "")
+    rule_content = request.get("rule_content")  # 可选，Chatflow 传入已匹配的规则
+
+    # 校验来源记录存在
+    source = db.query(CustomerSource).filter_by(id=source_id).first()
+    if not source:
+        raise NotFoundError(f"客户来源记录不存在: id={source_id}")
+
+    # 准备研判输入
+    raw_data = {
+        "source_type": source.source_type,
+        "content": content_text or (source.raw_content or ""),
+        "file_url": source.file_url,
+    }
+    rules = [{"product_line": "custom", "rule_content": rule_content}] if rule_content else []
+
+    # 调用 Dify Workflow 或降级 mock
+    ai_result = None
+    if is_dify_available():
+        try:
+            ai_result = call_dify_workflow(
+                "customer_profiling",
+                {
+                    "raw_data": raw_data,
+                    "rules": json.dumps(rules, ensure_ascii=False) if rules else "[]",
+                    "query": f"请对以下客户资料进行画像研判：{content_text}",
+                    "task_type": "customer_profiling",
+                },
+            )
+        except Exception:
+            pass
+
+    if ai_result is None:
+        ai_result = _mock_analysis_result(
+            {"name": content_text[:64] if content_text else None, "raw_text": content_text},
+            None,
+        )
+
+    # 保存研判结果
+    profile = CustomerProfile(
+        customer_name=ai_result.get("customer_name"),
+        source_id=source_id,
+        background_info=ai_result.get("background_info"),
+        match_result=ai_result.get("match_result"),
+        matched_product=ai_result.get("matched_product"),
+        match_score=ai_result.get("match_score"),
+        match_reason=ai_result.get("match_reason"),
+        recommended_programs=ai_result.get("recommended_programs"),
+        evaluator_id=None,  # Dify 调用时无用户上下文
+    )
+    db.add(profile)
+    source.parse_status = "success"
+    source.parse_result = ai_result.get("background_info", {})
+    db.commit()
+
+    return success_response(data=ai_result, message="研判完成")
 
 
 # ============================================================

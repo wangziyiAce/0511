@@ -378,18 +378,32 @@ def execute_analysis(
         # 4. 调用 Dify AI 进行研判（事务外调用外部 API）
         # ============================================
         # 先尝试真实 Dify 调用，失败则 fallback 到 mock（MVP 阶段）
+        # ⚠️ Dify Start 节点字段: raw_data(Object), rules(Text=JSON字符串), query(Text), task_type(Text)
         # ============================================
         from utils.dify_client import call_dify_workflow, is_dify_available
+        import json
 
         ai_result = None
         if is_dify_available():
             try:
+                # raw_data: 客户结构化数据（Object）
+                raw_data = {
+                    "source_type": source.source_type,
+                    "content": source.raw_content or "",
+                    "file_url": source.file_url,
+                }
+                # rules: 画像规则列表序列化为 JSON 字符串（Dify Start 没有 Array 类型）
+                rules_json = json.dumps(
+                    [{"product_line": r.product_line, "rule_content": r.rule_content} for r in rules],
+                    ensure_ascii=False,
+                )
                 ai_result = call_dify_workflow(
                     "customer_profiling",
                     {
-                        "customer_data": customer_data,
-                        "rules": [r.rule_content for r in rules],
-                        "prompt": rules[0].match_prompt if rules[0].match_prompt else "",
+                        "raw_data": raw_data,
+                        "rules": rules_json,
+                        "query": f"请对以下客户资料进行画像研判：{source.raw_content or ''}",
+                        "task_type": "customer_profiling",
                     },
                 )
                 logger.info(f"Dify 研判成功 source_id={source_id}: {ai_result.get('match_result')}")

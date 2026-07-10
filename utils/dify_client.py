@@ -36,6 +36,7 @@ API 认证:
   《教育服务系统_Dify工作流设计规范文档_V1.1》
 """
 
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -181,7 +182,31 @@ def call_dify_workflow(
 
     outputs = data.get("outputs", {})
     logger.info(f"Dify 调用成功: workflow={workflow_name}")
-    return outputs
+
+    # Dify Workflow 的 Answer 节点输出的是 JSON 字符串
+    # 结构: outputs.answer_json = '{"success":true,"result":{...}}'
+    # 解析并返回 result 部分，调用方直接使用 match_result/match_score 等字段
+    answer_json = outputs.get("answer_json", "{}")
+    if isinstance(answer_json, str):
+        try:
+            answer = json.loads(answer_json)
+        except json.JSONDecodeError:
+            raise BusinessError(
+                code=50202,
+                message="Dify 返回的 answer_json 无法解析",
+                status_code=502,
+            )
+    else:
+        answer = answer_json
+
+    if not answer.get("success"):
+        raise BusinessError(
+            code=50202,
+            message="AI 研判失败",
+            status_code=502,
+        )
+
+    return answer.get("result", {})
 
 
 def is_dify_available() -> bool:

@@ -669,3 +669,48 @@ def require_role(allowed_roles: List[str]) -> Callable:
         return current_user
 
     return role_checker
+
+
+# ============================================================
+# 第七部分：Dify 服务令牌鉴权
+# ============================================================
+# 对应 API 文档第 10 章 Dify 工具 API。
+#
+# Dify Chatflow / Workflow 中的 HTTP 节点调用 FastAPI 时，
+# 不使用用户 JWT（因为 Dify 没有登录用户），而是使用预设的服务令牌。
+#
+# 使用方式（在路由中）:
+#   @router.post("/profile/upload-json", dependencies=[Depends(verify_dify_token)])
+#
+# Dify 侧配置:
+#   HTTP 节点 → Authorization: Bearer {DIFY_SERVICE_TOKEN}
+#   Token 值从 .env 的 DIFY_SERVICE_TOKEN 中获取
+# ============================================================
+
+
+def verify_dify_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+):
+    """
+    校验 Dify 服务令牌。用于保护供 Dify 调用的接口。
+
+    与 get_current_user 的区别:
+      - get_current_user: 校验用户 JWT → 返回 SysUser 对象
+      - verify_dify_token: 校验固定令牌 → 不返回用户，仅验证身份
+
+    使用场景:
+      POST /api/v1/profile/upload-json   — Dify Chatflow 上传客户资料
+      POST /api/v1/profile/analyze-direct — Dify Chatflow 同步研判
+    """
+    from config import DIFY_SERVICE_TOKEN
+
+    if credentials is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": 40301, "message": "无效的服务令牌", "data": None},
+        )
+    if credentials.credentials != DIFY_SERVICE_TOKEN:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": 40301, "message": "服务令牌校验失败", "data": None},
+        )
