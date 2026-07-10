@@ -26,9 +26,30 @@
 | 行动详情 | GET/PATCH | `/api/v1/report-actions/{id}` |
 | 事实数据维护 | POST/GET | `/api/v1/report-data/*` |
 
-## 3. Dify Workflow 输入契约
+## 3. Dify Chatflow 输入契约
 
-统一 Workflow 输入：
+本次智能报告模块对接的是 **Dify Chatflow**，不是 Workflow。后端负责先完成 SQL 聚合、规则计算和数据质量判断，然后把结果作为 Chatflow 的 `inputs` 传入。Chatflow 只负责基于这些确定性数据生成解释、总结和管理建议。
+
+推荐调用 Dify Chatflow 的请求体结构：
+
+```json
+{
+  "inputs": {
+    "report_type": "application_risk",
+    "schema_version": 2,
+    "report_title": "申请风险周报",
+    "period": {"start": "2026-07-01", "end": "2026-07-07"},
+    "aggregated_data": {},
+    "expected_schema": {},
+    "data_quality": {"level": "ok", "warnings": [], "data_source": "database"}
+  },
+  "query": "请基于后端聚合数据生成本报告的 summary 和 explanation，不要改写任何业务数字。",
+  "response_mode": "blocking",
+  "user": "report-service"
+}
+```
+
+如果文档中只讨论业务变量，也可以简写为：
 
 ```json
 {
@@ -41,6 +62,8 @@
   "data_quality": {"level": "ok", "warnings": [], "data_source": "database"}
 }
 ```
+
+注意：Chatflow 返回的自然语言结果通常在 `answer` 字段中。后端需要从 `answer` 中解析 JSON 或结构化片段，再做 Pydantic Schema 校验，校验通过后才保存到 `report_content`。
 
 ## 4. Dify 输出边界
 
@@ -79,4 +102,3 @@ Dify 只能补充解释性字段：
 可以这样讲：
 
 > 我把智能报告模块做成“数据聚合 + 规则计算 + AI 解释 + 后端模板渲染”的链路。所有业务数字都来自 SQL 和规则引擎，Dify 只负责把结果解释成人能看懂的管理建议。这样既能发挥大模型的表达能力，也能避免大模型编造指标。
-
