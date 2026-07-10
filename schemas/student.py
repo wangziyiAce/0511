@@ -1,4 +1,358 @@
 """
+学生智能助手 — Pydantic 请求/响应 Schema
+
+严格对齐数据库表字段名（snake_case），API 规范 V1.2 §2.6
+
+命名规范 (API 规范 V1.2 §2.5):
+    - 请求体: {Resource}Create / {Resource}Update
+    - 响应体: {Resource}Response / {Resource}ListResponse
+"""
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List
+from datetime import datetime
+
+
+# =============================================================================
+# 请假管理 (student_admin_service 表)
+# =============================================================================
+
+class LeaveCreate(BaseModel):
+    """提交请假申请 — POST /student/leave-requests"""
+    student_id: int = Field(..., gt=0, description="学生ID → sys_user.id")
+    service_type: str = Field(default="leave", description="服务类型: leave/exam_query/other")
+    leave_type: str = Field(..., description="请假类型: sick/personal/emergency")
+    start_time: str = Field(..., description="开始时间 (YYYY-MM-DD HH:mm)")
+    end_time: str = Field(..., description="结束时间 (YYYY-MM-DD HH:mm)")
+    reason: str = Field(..., min_length=1, max_length=2000, description="申请事由")
+    attachment_url: Optional[str] = Field(None, max_length=512, description="附件URL")
+
+    @field_validator("leave_type")
+    @classmethod
+    def validate_leave_type(cls, v):
+        if v not in ("sick", "personal", "emergency"):
+            raise ValueError("leave_type must be: sick / personal / emergency")
+        return v
+
+    @field_validator("service_type")
+    @classmethod
+    def validate_service_type(cls, v):
+        if v not in ("leave", "exam_query", "other"):
+            raise ValueError("service_type must be: leave / exam_query / other")
+        return v
+
+
+class LeaveApprove(BaseModel):
+    """审批请假 — PUT /student/leave-requests/{id}/approve"""
+    action: str = Field(..., description="审批动作: approve / reject")
+    approver_id: int = Field(..., gt=0, description="审批人ID → sys_user.id")
+    approval_comment: Optional[str] = Field(None, max_length=512, description="审批意见")
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v):
+        if v not in ("approve", "reject"):
+            raise ValueError("action must be: approve / reject")
+        return v
+
+
+class LeaveItemResponse(BaseModel):
+    """请假记录响应"""
+    id: int
+    student_id: int
+    service_type: str
+    leave_type: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    reason: str
+    attachment_url: Optional[str] = None
+    status: str
+    approver_id: Optional[int] = None
+    approval_comment: Optional[str] = None
+    approval_time: Optional[str] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class LeaveListResponse(BaseModel):
+    """请假记录列表"""
+    total: int
+    items: List[LeaveItemResponse]
+
+
+# =============================================================================
+# 售后反馈 (student_feedback_ticket 表)
+# =============================================================================
+
+class FeedbackCreate(BaseModel):
+    """提交投诉/建议 — POST /student/feedback-tickets"""
+    student_id: int = Field(..., gt=0, description="学生ID → sys_user.id")
+    ticket_type: str = Field(default="complaint", description="工单类型: complaint/suggestion/consult")
+    category: Optional[str] = Field(None, max_length=64, description="分类")
+    title: Optional[str] = Field(None, max_length=255, description="工单标题")
+    content: str = Field(..., min_length=1, max_length=5000, description="反馈内容")
+    detail: Optional[str] = Field(None, description="详细描述")
+
+    @field_validator("ticket_type")
+    @classmethod
+    def validate_ticket_type(cls, v):
+        if v not in ("complaint", "suggestion", "consult"):
+            raise ValueError("ticket_type must be: complaint / suggestion / consult")
+        return v
+
+
+class FeedbackUpdate(BaseModel):
+    """处理投诉 — PUT /student/feedback-tickets/{id}"""
+    status: str = Field(..., description="目标状态: processing/resolved/closed")
+    assignee_id: Optional[int] = Field(None, gt=0, description="处理人ID → sys_user.id")
+    solution: Optional[str] = Field(None, description="解决方案")
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v):
+        if v not in ("processing", "resolved", "closed"):
+            raise ValueError("status must be: processing / resolved / closed")
+        return v
+
+
+class FeedbackItemResponse(BaseModel):
+    """工单响应"""
+    id: int
+    student_id: Optional[int] = None
+    ticket_type: str
+    category: Optional[str] = None
+    title: Optional[str] = None
+    content: str
+    detail: Optional[str] = None
+    status: str
+    priority: str
+    assignee_id: Optional[int] = None
+    solution: Optional[str] = None
+    satisfaction: Optional[int] = None
+    is_notified: int = 0
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class FeedbackListResponse(BaseModel):
+    """工单列表"""
+    total: int
+    items: List[FeedbackItemResponse]
+
+
+# =============================================================================
+# 心理健康 (student_psych_record / profile / alert 表)
+# =============================================================================
+
+class PsychRecordCreate(BaseModel):
+    """记录心理交互 — POST /student/psych/record (Dify 白名单)"""
+    student_id: int = Field(..., gt=0, description="学生ID → sys_user.id")
+    emotion_tag: str = Field(..., description="情绪标签: 焦虑/低落/愤怒/平稳/积极")
+    emotion_score: int = Field(..., ge=0, le=100, description="情绪分值 (0-100)")
+    interaction_content: str = Field(..., description="交互内容摘要")
+    trigger_keywords: Optional[List[str]] = Field(None, description="触发关键词")
+    record_date: Optional[str] = Field(None, description="记录日期 (YYYY-MM-DD)")
+
+
+class PsychRecordResponse(BaseModel):
+    """心理记录写入结果"""
+    id: int
+    student_id: int
+    emotion_tag: str
+    emotion_score: int
+    risk_level: str
+    alert_created: bool = False
+    alert_id: Optional[int] = None
+
+
+class PsychAlertItemResponse(BaseModel):
+    """心理预警响应"""
+    id: int
+    student_id: int
+    trigger_reason: str
+    risk_level: str
+    status: str
+    teacher_id: Optional[int] = None
+    follow_record: Optional[str] = None
+    resolved_time: Optional[str] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PsychAlertListResponse(BaseModel):
+    """心理预警列表"""
+    total: int
+    items: List[PsychAlertItemResponse]
+
+
+class PsychAlertUpdate(BaseModel):
+    """处理心理预警 — PUT /student/psych/alerts/{id}"""
+    status: str = Field(..., description="目标状态: following/resolved/dismissed")
+    teacher_id: int = Field(..., gt=0, description="负责老师ID → sys_user.id")
+    follow_record: Optional[str] = Field(None, description="跟进记录")
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v):
+        if v not in ("following", "resolved", "dismissed"):
+            raise ValueError("status must be: following / resolved / dismissed")
+        return v
+
+
+# =============================================================================
+# 申请进度 (application_progress 表)
+# =============================================================================
+
+class ApplicationItemResponse(BaseModel):
+    """申请进度响应"""
+    id: int
+    student_id: int
+    target_school: Optional[str] = None
+    target_major: Optional[str] = None
+    stage: Optional[str] = None
+    progress_detail: Optional[str] = None
+    deadline: Optional[str] = None
+    next_action: Optional[str] = None
+    handler_id: Optional[int] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ApplicationListResponse(BaseModel):
+    """申请进度列表"""
+    total: int
+    items: List[ApplicationItemResponse]
+
+
+# =============================================================================
+# 学业DDL (academic_deadline 表)
+# =============================================================================
+
+class DeadlineItemResponse(BaseModel):
+    """学业DDL响应"""
+    id: int
+    student_id: Optional[int] = None
+    deadline_type: str
+    title: str
+    description: Optional[str] = None
+    deadline: str
+    reminder_enabled: int = 1
+    reminder_days: Optional[list] = None
+    status: str = "pending"
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DeadlineListResponse(BaseModel):
+    """DDL列表"""
+    total: int
+    items: List[DeadlineItemResponse]
+
+
+# =============================================================================
+# 通用分页
+# =============================================================================
+
+class PaginationParams(BaseModel):
+    """通用分页参数 — API 规范 V1.2 §12.1"""
+    page: int = Field(default=1, ge=1, description="页码")
+    page_size: int = Field(default=20, ge=1, le=100, description="每页条数")
+
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.page_size
+
+
+# =============================================================================
+# 通知中心 (student_notification 表)
+# =============================================================================
+
+class NotificationItemResponse(BaseModel):
+    """通知条目响应"""
+    id: int
+    student_id: int
+    notify_type: str
+    title: str
+    content: str
+    related_type: Optional[str] = None
+    related_id: Optional[int] = None
+    is_read: int = 0
+    create_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationListResponse(BaseModel):
+    """通知列表"""
+    total: int
+    unread_count: int
+    items: List[NotificationItemResponse]
+
+
+# =============================================================================
+# 增值转化 - 意向标签 (student_intent_tag 表)
+# =============================================================================
+
+class IntentCreate(BaseModel):
+    """记录学生意向 — POST /student/intent"""
+    student_id: int = Field(..., gt=0, description="学生ID → sys_user.id")
+    intent_type: str = Field(..., description="意向类型: master/phd/transfer/consult/other")
+    intent_name: Optional[str] = Field(None, max_length=128, description="意向名称")
+    source: Optional[str] = Field("chat", description="来源: chat/feedback/progress/manual")
+    score: Optional[int] = Field(None, ge=0, le=100, description="意向强度(0-100)")
+    remark: Optional[str] = Field(None, description="备注")
+
+    @field_validator("intent_type")
+    @classmethod
+    def validate_intent_type(cls, v):
+        if v not in ("master", "phd", "transfer", "consult", "other"):
+            raise ValueError("intent_type must be: master / phd / transfer / consult / other")
+        return v
+
+
+class IntentItemResponse(BaseModel):
+    """意向标签响应"""
+    id: int
+    student_id: int
+    intent_type: str
+    intent_name: Optional[str] = None
+    source: Optional[str] = None
+    score: Optional[int] = None
+    remark: Optional[str] = None
+    create_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class IntentListResponse(BaseModel):
+    """意向标签列表"""
+    total: int
+    items: List[IntentItemResponse]
+
+
+class RecommendationResponse(BaseModel):
+    """增值转化推荐项"""
+    intent_type: str
+    intent_name: Optional[str] = None
+    matched_project: str
+    score: Optional[int] = None
+"""
 基础设施模块 — Pydantic Schema
 ===========================================
 用户、角色、组织架构相关的请求/响应数据结构。

@@ -1,4 +1,611 @@
 """
+学生智能助手 — 业务逻辑层
+
+职责:
+    1. 业务规则校验（状态机、数据合法性）
+    2. 逻辑外键存在性校验（无物理外键场景，使用 EXISTS 子查询）
+    3. 事务管理（事务中不调用外部 API）
+
+对齐文档:
+    - 数据库设计规范 V2.1 §5、§6.6、§14
+    - API 接口规范 V1.2 §7、§14
+"""
+from datetime import date, datetime, timedelta
+from typing import Optional
+from sqlalchemy.orm import Session
+from sqlalchemy import update, text
+from fastapi import HTTPException
+
+from models.student import (
+    StudentInfo, StudentAdminService,
+    StudentPsychProfile, StudentPsychRecord, StudentPsychAlert,
+    StudentFeedbackTicket, ApplicationProgress, AcademicDeadline,
+    StudentNotification, StudentIntentTag,
+)
+
+
+# =============================================================================
+# 逻辑外键校验 — 表名硬编码，参数化绑定，无 SQL 注入风险
+# =============================================================================
+
+def _user_exists(db: Session, user_id: int, user_type: Optional[str] = None) -> bool:
+    """校验 sys_user 中存在指定类型的正常用户"""
+    if user_type:
+        sql = text(
+            "SELECT EXISTS(SELECT 1 FROM sys_user"
+            " WHERE id=:id AND user_type=:ut AND status='normal') AS result"
+        )
+        return bool(db.execute(sql, {"id": user_id, "ut": user_type}).scalar())
+    sql = text(
+        "SELECT EXISTS(SELECT 1 FROM sys_user"
+        " WHERE id=:id AND status='normal') AS result"
+    )
+    return bool(db.execute(sql, {"id": user_id}).scalar())
+
+
+def _student_user_exists(db: Session, student_id: int) -> bool:
+    """校验 sys_user 中存在正常学生用户"""
+    return _user_exists(db, student_id, "student")
+
+
+# =============================================================================
+# 错误响应辅助 — 对齐 API 规范 V1.2 §3.3 {code, message, data}
+# =============================================================================
+
+def _raise(code: int, message: str, status_code: int = 400):
+    raise HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, "data": None},
+    )
+
+
+# =============================================================================
+# StudentService
+# =============================================================================
+
+class StudentService:
+    """学生业务服务"""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def _commit(self):
+        """安全提交，统一异常处理"""
+        try:
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            _raise(50001, f"数据库操作失败: {str(e)[:200]}", 500)
+
+    # =========================================================================
+    # 请假管理
+    # =========================================================================
+
+    def create_leave_request(self, data) -> StudentAdminService:
+        """提交请假申请 — 双重逻辑外键校验"""
+        if not _student_user_exists(self.db, data.student_id):
+            _raise(40402, f"学生用户不存在: id={data.student_id}", 404)
+
+        info = self.db.query(StudentInfo).filter(
+            StudentInfo.user_id == data.student_id,
+            StudentInfo.status == "active",
+        ).first()
+        if not info:
+            _raise(40402, f"学生档案不存在或已离校: id={data.student_id}", 404)
+
+        if data.end_time <= data.start_time:
+            _raise(40001, "结束时间必须晚于开始时间", 400)
+
+        leave = StudentAdminService(
+            student_id=data.student_id,
+            service_type=data.service_type,
+            leave_type=data.leave_type,
+            start_time=data.start_time if isinstance(data.start_time, datetime) else datetime.strptime(data.start_time, "%Y-%m-%d %H:%M"),
+            end_time=data.end_time if isinstance(data.end_time, datetime) else datetime.strptime(data.end_time, "%Y-%m-%d %H:%M"),
+            reason=data.reason,
+            attachment_url=data.attachment_url,
+            status="pending",
+        )
+        self.db.add(leave)
+        self._commit()
+        self.db.refresh(leave)
+        return leave
+
+    def approve_leave(self, request_id: int, data) -> StudentAdminService:
+        """审批请假 — 条件更新防并发 + 角色校验"""
+        leave = self.db.query(StudentAdminService).filter(
+            StudentAdminService.id == request_id,
+            StudentAdminService.service_type == "leave",
+        ).first()
+        if not leave:
+            _raise(40401, "请假申请不存在", 404)
+
+        if leave.status != "pending":
+            _raise(40902, f"请假状态为 {leave.status}，不可审批", 422)
+
+        # 审批人必须是员工或管理员
+        if not _user_exists(self.db, data.approver_id, "employee"):
+            if not _user_exists(self.db, data.approver_id, "admin"):
+                _raise(40301, "审批人必须是员工或管理员", 403)
+
+        new_status = "approved" if data.action == "approve" else "rejected"
+        result = self.db.execute(
+            update(StudentAdminService)
+            .where(
+                StudentAdminService.id == request_id,
+                StudentAdminService.status == "pending",
+            )
+            .values(
+                status=new_status,
+                approver_id=data.approver_id,
+                approval_comment=data.approval_comment,
+                approval_time=datetime.now(),
+                update_time=datetime.now(),
+            )
+        )
+        if result.rowcount == 0:
+            _raise(40901, "请假状态已被其他操作修改，请刷新后重试", 409)
+
+        # 写入学生通知（仅 add，统一在 _commit 落库）
+        approved = new_status == "approved"
+        self._push_notification(
+            leave.student_id,
+            "leave_approved" if approved else "leave_rejected",
+            f"请假申请{'已批准' if approved else '被驳回'}",
+            f"您的请假申请（{leave.leave_type or '请假'}，"
+            f"{leave.start_time} 至 {leave.end_time}）"
+            f"{'已批准' if approved else '被驳回'}。"
+            f"{('审批意见：' + data.approval_comment) if data.approval_comment else ''}",
+            related_type="leave", related_id=request_id,
+        )
+
+        self._commit()
+        self.db.refresh(leave)
+        return leave
+
+    def cancel_leave(self, request_id: int, student_id: int) -> StudentAdminService:
+        """学生自主撤销请假"""
+        leave = self.db.query(StudentAdminService).filter(
+            StudentAdminService.id == request_id,
+            StudentAdminService.service_type == "leave",
+        ).first()
+        if not leave:
+            _raise(40401, "请假申请不存在", 404)
+        if leave.student_id != student_id:
+            _raise(40301, "只能撤销本人的请假申请", 403)
+        if leave.status != "pending":
+            _raise(40902, f"请假状态为 {leave.status}，不可撤销", 422)
+
+        result = self.db.execute(
+            update(StudentAdminService)
+            .where(
+                StudentAdminService.id == request_id,
+                StudentAdminService.status == "pending",
+            )
+            .values(status="cancelled", update_time=datetime.now())
+        )
+        if result.rowcount == 0:
+            _raise(40901, "请假状态已被修改，请刷新后重试", 409)
+
+        self._commit()
+        self.db.refresh(leave)
+        return leave
+
+    def list_leaves(
+        self, student_id: int, status: Optional[str] = None,
+        page: int = 1, page_size: int = 20
+    ) -> dict:
+        return self._paginate(
+            self.db.query(StudentAdminService).filter(
+                StudentAdminService.service_type == "leave",
+                StudentAdminService.student_id == student_id,
+            ),
+            status, StudentAdminService.status, StudentAdminService.create_time,
+            page, page_size,
+        )
+
+    # =========================================================================
+    # 售后反馈
+    # =========================================================================
+
+    def create_feedback(self, data) -> StudentFeedbackTicket:
+        """提交投诉/建议 — student_id 必填（DB 约束 NOT NULL）"""
+        if not _student_user_exists(self.db, data.student_id):
+            _raise(40402, f"学生用户不存在: id={data.student_id}", 404)
+
+        priority = "medium"
+        content_text = (data.content or "") + (data.detail or "")
+        if any(w in content_text for w in ["退款", "律师", "起诉"]):
+            priority = "urgent"
+        elif any(w in content_text for w in ["投诉", "严重", "紧急", "曝光"]):
+            priority = "high"
+
+        ticket = StudentFeedbackTicket(
+            student_id=data.student_id,
+            ticket_type=data.ticket_type,
+            category=data.category,
+            title=data.title,
+            content=data.content,
+            detail=data.detail,
+            status="pending",
+            priority=priority,
+        )
+        self.db.add(ticket)
+        self._commit()
+        self.db.refresh(ticket)
+        return ticket
+
+    def update_feedback(self, ticket_id: int, data) -> StudentFeedbackTicket:
+        """处理投诉"""
+        ticket = self.db.query(StudentFeedbackTicket).filter(
+            StudentFeedbackTicket.id == ticket_id
+        ).first()
+        if not ticket:
+            _raise(40401, "工单不存在", 404)
+
+        VALID_TRANSITIONS = {
+            "pending": ["processing"],
+            "processing": ["resolved"],
+            "resolved": ["closed"],
+            "closed": [],
+        }
+        if data.status not in VALID_TRANSITIONS.get(ticket.status, []):
+            _raise(40902,
+                   f"工单状态不允许从 {ticket.status} 变更为 {data.status}", 422)
+
+        if data.assignee_id is not None:
+            if not _user_exists(self.db, data.assignee_id):
+                _raise(40402, f"处理人不存在: id={data.assignee_id}", 404)
+
+        ticket.status = data.status
+        if data.assignee_id is not None:
+            ticket.assignee_id = data.assignee_id
+        if data.solution is not None:
+            ticket.solution = data.solution
+
+        # 工单处理完成（已解决/已关闭）后通知学生
+        if data.status in ("resolved", "closed"):
+            self._push_notification(
+                ticket.student_id, "feedback_resolved",
+                "您的反馈已处理完成",
+                f"您提交的工单「{ticket.title or ticket.content[:20]}」"
+                f"已{'解决' if data.status == 'resolved' else '关闭'}。"
+                f"{('处理结果：' + data.solution) if data.solution else ''}",
+                related_type="feedback", related_id=ticket_id,
+            )
+
+        self._commit()
+        self.db.refresh(ticket)
+        return ticket
+
+    def list_feedbacks(
+        self, student_id: int, status: Optional[str] = None,
+        page: int = 1, page_size: int = 20
+    ) -> dict:
+        return self._paginate(
+            self.db.query(StudentFeedbackTicket).filter(
+                StudentFeedbackTicket.student_id == student_id,
+            ),
+            status, StudentFeedbackTicket.status, StudentFeedbackTicket.create_time,
+            page, page_size,
+        )
+
+    # =========================================================================
+    # 心理健康 — 核心预警联动
+    # =========================================================================
+
+    HIGH_RISK_WORDS = [
+        "自杀", "轻生", "不想活", "死了算了", "活着没意思",
+        "自残", "割腕", "跳楼", "安眠药", "结束生命",
+        "绝望", "崩溃", "撑不下去了", "没希望了", "想死",
+    ]
+
+    def record_psych(self, data) -> dict:
+        """记录心理交互 — 联动更新画像 + 条件创建预警"""
+        if not _student_user_exists(self.db, data.student_id):
+            _raise(40402, f"学生不存在: id={data.student_id}", 404)
+
+        record = StudentPsychRecord(
+            student_id=data.student_id,
+            emotion_tag=data.emotion_tag,
+            emotion_score=data.emotion_score,
+            interaction_content=data.interaction_content,
+            trigger_keywords=data.trigger_keywords,
+            record_date=datetime.strptime(data.record_date, "%Y-%m-%d").date() if data.record_date else date.today(),
+        )
+        self.db.add(record)
+
+        # 更新或创建心理画像（ORM 方式，避免数据库方言绑定）
+        now = datetime.now()
+        profile = self.db.query(StudentPsychProfile).filter(
+            StudentPsychProfile.student_id == data.student_id
+        ).first()
+
+        if profile:
+            profile.latest_emotion_tag = data.emotion_tag
+            profile.emotion_score = data.emotion_score
+            profile.last_interaction_time = now
+            profile.update_time = now
+        else:
+            profile = StudentPsychProfile(
+                student_id=data.student_id,
+                latest_emotion_tag=data.emotion_tag,
+                emotion_score=data.emotion_score,
+                last_interaction_time=now,
+                risk_level="low",
+                create_time=now,
+                update_time=now,
+            )
+            self.db.add(profile)
+
+        self.db.flush()
+
+        alert_created = False
+        alert_id = None
+        risk_level = self._determine_risk_level(data)
+
+        if risk_level in ("medium", "high"):
+            alert = StudentPsychAlert(
+                student_id=data.student_id,
+                trigger_reason=(
+                    f"情绪分值 {data.emotion_score}，"
+                    f"标签: {data.emotion_tag}，"
+                    f"关键词: {data.trigger_keywords or '无'}"
+                )[:500],
+                risk_level=risk_level,
+                status="pending",
+            )
+            self.db.add(alert)
+            self.db.flush()
+            alert_created = True
+            alert_id = alert.id
+
+        # 更新画像风险等级
+        profile.risk_level = risk_level
+
+        # 高危表达：主动通知学生，班主任/心理老师会介入
+        if risk_level == "high":
+            self._push_notification(
+                data.student_id, "psych_alert",
+                "我们关注到了你最近的状态",
+                "我们已注意到你最近的情绪状态，班主任/心理老师会尽快与你联系。"
+                "你不是一个人，请记得寻求帮助。",
+                related_type="psych", related_id=alert_id,
+            )
+
+        self._commit()
+        return {
+            "id": record.id, "student_id": data.student_id,
+            "emotion_tag": data.emotion_tag, "emotion_score": data.emotion_score,
+            "risk_level": risk_level,
+            "alert_created": alert_created, "alert_id": alert_id,
+        }
+
+    def _determine_risk_level(self, data) -> str:
+        """根据情绪分值 + 关键词判定风险等级"""
+        if data.emotion_score < 20:
+            return "high"
+        keywords_str = " ".join(data.trigger_keywords or []) + " " + data.interaction_content
+        if any(w in keywords_str for w in self.HIGH_RISK_WORDS):
+            return "high"
+        if data.emotion_score < 40:
+            return "medium"
+        return "low"
+
+    def list_psych_alerts(
+        self, risk_level: Optional[str] = None,
+        status: Optional[str] = None,
+        page: int = 1, page_size: int = 20,
+    ) -> dict:
+        q = self.db.query(StudentPsychAlert)
+        if risk_level:
+            q = q.filter(StudentPsychAlert.risk_level == risk_level)
+        if status:
+            q = q.filter(StudentPsychAlert.status == status)
+        return self._paginate(
+            q, None, None, StudentPsychAlert.create_time, page, page_size,
+        )
+
+    def update_psych_alert(self, alert_id: int, data) -> StudentPsychAlert:
+        """处理心理预警"""
+        alert = self.db.query(StudentPsychAlert).filter(
+            StudentPsychAlert.id == alert_id
+        ).first()
+        if not alert:
+            _raise(40401, "预警不存在", 404)
+
+        VALID_TRANSITIONS = {
+            "pending": ["following"],
+            "following": ["resolved", "dismissed"],
+            "resolved": [], "dismissed": [],
+        }
+        if data.status not in VALID_TRANSITIONS.get(alert.status, []):
+            _raise(40902,
+                   f"预警状态不允许从 {alert.status} 变更为 {data.status}", 422)
+
+        if not _user_exists(self.db, data.teacher_id):
+            _raise(40402, f"老师不存在: id={data.teacher_id}", 404)
+
+        alert.status = data.status
+        alert.teacher_id = data.teacher_id
+        if data.follow_record is not None:
+            alert.follow_record = data.follow_record
+        if data.status == "resolved":
+            alert.resolved_time = datetime.now()
+            # 跟进完成，通知学生
+            self._push_notification(
+                alert.student_id, "psych_alert",
+                "心理关怀跟进已完成",
+                "感谢你的信任，老师已完成本次心理关怀跟进。如需帮助可随时联系我们。",
+                related_type="psych", related_id=alert_id,
+            )
+
+        self._commit()
+        self.db.refresh(alert)
+        return alert
+
+    # =========================================================================
+    # 申请进度
+    # =========================================================================
+
+    def list_applications(
+        self, student_id: int, page: int = 1, page_size: int = 20
+    ) -> dict:
+        return self._paginate(
+            self.db.query(ApplicationProgress).filter(
+                ApplicationProgress.student_id == student_id,
+            ),
+            None, None, ApplicationProgress.update_time, page, page_size,
+        )
+
+    # =========================================================================
+    # 学业DDL
+    # =========================================================================
+
+    def list_deadlines(
+        self, student_id: int, upcoming_days: int = 30,
+        page: int = 1, page_size: int = 20
+    ) -> dict:
+        today = date.today()
+        cutoff = datetime.combine(
+            today + timedelta(days=upcoming_days),
+            datetime.max.time()
+        )
+
+        return self._paginate(
+            self.db.query(AcademicDeadline).filter(
+                AcademicDeadline.student_id == student_id,
+                AcademicDeadline.status.in_(["pending", "reminded"]),
+                AcademicDeadline.deadline >= today,
+                AcademicDeadline.deadline <= cutoff,
+            ),
+            None, None, AcademicDeadline.deadline, page, page_size,
+        )
+
+    # =========================================================================
+    # 通知中心
+    # =========================================================================
+
+    def _push_notification(
+        self, student_id: int, ntype: str, title: str, content: str,
+        related_type: Optional[str] = None, related_id: Optional[int] = None,
+    ) -> StudentNotification:
+        """写入一条学生通知（仅 add，由调用方统一 commit）"""
+        note = StudentNotification(
+            student_id=student_id,
+            notify_type=ntype,
+            title=title,
+            content=content,
+            related_type=related_type,
+            related_id=related_id,
+        )
+        self.db.add(note)
+        return note
+
+    def list_notifications(
+        self, student_id: int, only_unread: bool = False,
+        page: int = 1, page_size: int = 20,
+    ) -> dict:
+        q = self.db.query(StudentNotification).filter(
+            StudentNotification.student_id == student_id
+        )
+        if only_unread:
+            q = q.filter(StudentNotification.is_read == 0)
+        unread_count = self.db.query(StudentNotification).filter(
+            StudentNotification.student_id == student_id,
+            StudentNotification.is_read == 0,
+        ).count()
+        total = q.count()
+        items = q.order_by(StudentNotification.create_time.desc()) \
+                  .offset((page - 1) * page_size).limit(page_size).all()
+        return {"total": total, "unread_count": unread_count, "items": items}
+
+    def mark_notification_read(self, notification_id: int, student_id: int) -> StudentNotification:
+        note = self.db.query(StudentNotification).filter(
+            StudentNotification.id == notification_id,
+            StudentNotification.student_id == student_id,
+        ).first()
+        if not note:
+            _raise(40401, "通知不存在或不属于该学生", 404)
+        note.is_read = 1
+        note.update_time = datetime.now()
+        self._commit()
+        self.db.refresh(note)
+        return note
+
+    def mark_all_read(self, student_id: int) -> int:
+        cnt = self.db.query(StudentNotification).filter(
+            StudentNotification.student_id == student_id,
+            StudentNotification.is_read == 0,
+        ).update({
+            StudentNotification.is_read: 1,
+            StudentNotification.update_time: datetime.now(),
+        })
+        self._commit()
+        return cnt
+
+    # =========================================================================
+    # 增值转化 — 意向标签
+    # =========================================================================
+
+    _PROJECT_POOL = {
+        "master": "硕士升学规划与背景提升项目",
+        "phd": "博士申请与科研能力打造项目",
+        "transfer": "转专业 / 双学位衔接方案",
+        "consult": "1 对 1 升学规划咨询",
+        "other": "定制化留学增值服务",
+    }
+
+    def create_intent(self, data) -> StudentIntentTag:
+        if not _student_user_exists(self.db, data.student_id):
+            _raise(40402, f"学生用户不存在: id={data.student_id}", 404)
+        tag = StudentIntentTag(
+            student_id=data.student_id,
+            intent_type=data.intent_type,
+            intent_name=data.intent_name,
+            source=data.source or "chat",
+            score=data.score,
+            remark=data.remark,
+        )
+        self.db.add(tag)
+        self._commit()
+        self.db.refresh(tag)
+        return tag
+
+    def list_intents(self, student_id: int) -> list:
+        return self.db.query(StudentIntentTag).filter(
+            StudentIntentTag.student_id == student_id
+        ).order_by(
+            StudentIntentTag.score.is_(None),   # 非空排前（MySQL 无 NULLS LAST）
+            StudentIntentTag.score.desc(),
+            StudentIntentTag.create_time.desc(),
+        ).all()
+
+    def get_recommendations(self, student_id: int) -> list:
+        if not _student_user_exists(self.db, student_id):
+            _raise(40402, f"学生用户不存在: id={student_id}", 404)
+        tags = self.list_intents(student_id)
+        return [{
+            "intent_type": t.intent_type,
+            "intent_name": t.intent_name,
+            "matched_project": self._PROJECT_POOL.get(
+                t.intent_type, self._PROJECT_POOL["other"]),
+            "score": t.score,
+        } for t in tags]
+
+    # =========================================================================
+    # 通用分页
+    # =========================================================================
+
+    def _paginate(self, query, status_filter, status_col, order_col,
+                   page: int = 1, page_size: int = 20) -> dict:
+        if status_filter and status_col is not None:
+            query = query.filter(status_col == status_filter)
+        total = query.count()
+        items = query.order_by(order_col.desc()) \
+                      .offset((page - 1) * page_size).limit(page_size).all()
+        return {"total": total, "items": items}
+"""
 基础设施模块 — 用户/角色/组织 业务服务层
 ===========================================
 所有基础设施相关的业务逻辑在这里实现。
