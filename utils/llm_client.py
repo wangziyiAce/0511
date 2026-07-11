@@ -56,7 +56,7 @@ class LLMClient:
             "返回 JSON（只返回 JSON，不要其他内容）：\n"
             "{\n"
             '  "intent": "leave_request|complaint_submit|application_progress|'
-            'deadline_query|notification_query|score_query|psych_express|chat",\n'
+            'deadline_query|notification_query|score_query|upselling|psych_express|chat",\n'
             '  "slots": {\n'
             '    "leave_type": "sick|personal|emergency 或空",\n'
             '    "start_time": "YYYY-MM-DD HH:mm 或空",\n'
@@ -76,6 +76,7 @@ class LLMClient:
             "- deadline_query: 查DDL/截止日期/考试\n"
             "- notification_query: 看通知/消息\n"
             "- score_query: 查成绩/分数/绩点/GPA/考试多少分\n"
+            "- upselling: 想读博/读硕/考研/提升学历/继续深造\n"
             "- psych_express: 表达情绪/压力/焦虑/开心\n"
             "- chat: 打招呼/闲聊/感谢/其他\n\n"
             "注意：\n"
