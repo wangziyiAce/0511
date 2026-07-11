@@ -1,0 +1,4 @@
+export interface CustomerSource { id: number; source_type: string; raw_content?: string | null; file_name?: string | null; parse_status: string; parse_error?: string | null; create_time: string }
+export interface SourcePage { items: CustomerSource[]; total: number; page: number; page_size: number }
+export interface ProfileDetail { source_id: number; source_type: string; file_name?: string | null; parse_status: string; parse_error?: string | null; customer_name?: string | null; contact_info?: string | null; background_info?: Record<string, unknown> | null; match_result?: string | null; matched_product?: string | null; match_score?: number | null; match_reason?: string | null; recommended_programs?: unknown; source_create_time: string; profile_update_time?: string | null }
+export interface ProfileRule { id: number; product_line: string; rule_name: string; rule_content: Record<string, unknown>; match_prompt?: string | null; priority: number; status: number }
