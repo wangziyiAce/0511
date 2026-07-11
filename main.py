@@ -172,16 +172,14 @@ def health_check():
 # 取消下面的注释即可启用。
 # ============================================================
 
-# --- 路由注册（取消注释即可启用对应的功能模块）---
-# from routers import chat, crm, profile, report, student, tools
-#
-# app.include_router(chat.router,    prefix="/api/v1/chat",    tags=["客服Agent"])
+# --- 路由注册 ---
+from routers import student
+from routers import student_chat
+
 app.include_router(crm_router,      prefix="/api/v1/crm",      tags=["企业助手"])
 app.include_router(employee_router, prefix="/api/v1/employee", tags=["员工日报"])
-# app.include_router(profile.router, prefix="/api/v1/profile", tags=["客户研判"])
-# app.include_router(report.router,  prefix="/api/v1/report",  tags=["智能报告"])
-# app.include_router(student.router, prefix="/api/v1/student", tags=["学生助手"])
-# app.include_router(tools.router,   prefix="/api/v1/tools",   tags=["系统工具"])
+app.include_router(student.router, prefix="/api/v1/student", tags=["学生智能助手"])
+app.include_router(student_chat.router, prefix="/api/v1")
 
 
 # ============================================================
