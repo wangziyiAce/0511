@@ -81,6 +81,12 @@ def _enable_assistant_settings(monkeypatch):
     return test_settings
 
 
+@pytest.fixture(autouse=True)
+def _isolate_assistant_settings(monkeypatch):
+    """让本模块所有用例使用确定性关键词路由，隔离开发机真实 LLM 配置。"""
+    _enable_assistant_settings(monkeypatch)
+
+
 def _create_token_and_override(monkeypatch, app, db_session):
     """在 SQLite 内存库中创建用户并生成 Token，同时覆盖 get_db 依赖。"""
     from models.user import SysUser

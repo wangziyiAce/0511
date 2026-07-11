@@ -101,7 +101,7 @@ class TestServiceSuccessPath:
 
         from services.reporting.assistant.schemas import AssistantToolResult
 
-        def mock_execute(self, plan, resolved_period, generated_by, db, idempotency_key=None, current_user=None, context=None):
+        def mock_execute(self, plan, resolved_period, generated_by, db, idempotency_key=None, current_user=None, context=None, message=""):
             return [AssistantToolResult(
                 tool_name="generate_existing_report",
                 status="success",

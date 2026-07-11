@@ -174,40 +174,56 @@ class ReportAssistantService:
                 context=context,
             )
 
-        # ---- Step 4：时间解析 ----
-        if plan.report_type is None:
-            return self._build_response(
-                status="needs_clarification",
-                intent=plan.intent,
-                answer="请具体说明你想查看的报告类型。",
-                needs_clarification=True,
-                clarification_question="你想查看申请风险、销售漏斗、投诉处理还是其他报告？",
-                confidence=plan.confidence,
-                context=context,
-            )
+        # ---- Step 4：时间解析（仅 GENERATE_REPORT 需要） ----
+        # 多轮追问意图（drill_down/explain_risk/explain_metric/query_data_quality/
+        # query_report_status）不需要时间解析，直接使用上下文中已有的 report 信息
+        _MULTI_TURN_INTENTS = {
+            ReportAssistantIntent.DRILL_DOWN,
+            ReportAssistantIntent.EXPLAIN_RISK,
+            ReportAssistantIntent.EXPLAIN_METRIC,
+            ReportAssistantIntent.QUERY_DATA_QUALITY,
+            ReportAssistantIntent.QUERY_REPORT_STATUS,
+        }
 
-        definition = get_report_definition(plan.report_type)
+        if plan.intent in _MULTI_TURN_INTENTS:
+            # 多轮追问：跳过时间解析，使用 context 中的信息
+            resolved = None
+            all_assumptions = plan.assumptions
+        else:
+            # 生成报告：需要时间解析
+            if plan.report_type is None:
+                return self._build_response(
+                    status="needs_clarification",
+                    intent=plan.intent,
+                    answer="请具体说明你想查看的报告类型。",
+                    needs_clarification=True,
+                    clarification_question="你想查看申请风险、销售漏斗、投诉处理还是其他报告？",
+                    confidence=plan.confidence,
+                    context=context,
+                )
 
-        try:
-            resolved = resolve_assistant_period(
-                relative_period=plan.relative_period,
-                period_start=plan.period_start,
-                period_end=plan.period_end,
-                report_definition=definition,
-                now=datetime.now(),
-            )
-        except ValueError as exc:
-            return self._build_response(
-                status="needs_clarification",
-                intent=plan.intent,
-                answer=f"时间解析失败：{exc}",
-                needs_clarification=True,
-                clarification_question="请提供具体的时间范围，例如'上周'、'本月'。",
-                confidence=plan.confidence,
-                context=context,
-            )
+            definition = get_report_definition(plan.report_type)
 
-        all_assumptions = plan.assumptions + resolved.assumptions
+            try:
+                resolved = resolve_assistant_period(
+                    relative_period=plan.relative_period,
+                    period_start=plan.period_start,
+                    period_end=plan.period_end,
+                    report_definition=definition,
+                    now=datetime.now(),
+                )
+            except ValueError as exc:
+                return self._build_response(
+                    status="needs_clarification",
+                    intent=plan.intent,
+                    answer=f"时间解析失败：{exc}",
+                    needs_clarification=True,
+                    clarification_question="请提供具体的时间范围，例如'上周'、'本月'。",
+                    confidence=plan.confidence,
+                    context=context,
+                )
+
+            all_assumptions = plan.assumptions + resolved.assumptions
 
         # ---- Step 5：工具调用 ----
         # 构建幂等键：client_request_id → manual:{key}
@@ -225,6 +241,7 @@ class ReportAssistantService:
             db=db,
             current_user=current_user,
             context=context,
+            message=message,
         )
 
         # 检查是否有工具返回了错误
@@ -349,8 +366,9 @@ class ReportAssistantService:
         idempotency_key: Optional[str] = None,
         current_user: Any = None,
         context: Optional[ReportConversationContext] = None,
+        message: str = "",
     ) -> list[AssistantToolResult]:
-        """根据意图选择并执行对应工具（Iteration 2A：返回工具结果列表）。
+        """根据意图选择并执行对应工具（Iteration 2A.1：返回工具结果列表）。
 
         Args:
             plan: 解析后的请求计划。
@@ -360,6 +378,7 @@ class ReportAssistantService:
             idempotency_key: 幂等键（可选）。
             current_user: 当前用户（用于权限检查）。
             context: 当前会话上下文。
+            message: 用户原始消息（Iteration 2A.1：用于实体引用解析）。
 
         Returns:
             AssistantToolResult 列表（Iteration 2A 可能调用多个工具）。
@@ -417,12 +436,14 @@ class ReportAssistantService:
                     tool_name="explain_risk", status="error",
                     error="没有关联的报告",
                 )]
-            # 解析实体引用
+            # 使用原始用户消息解析实体引用（Iteration 2A.1 修正）
             from services.reporting.assistant.context import resolve_entity_reference
-            entity = resolve_entity_reference(
-                message=plan.assumptions[0] if plan.assumptions else "",
-                context=context or ReportConversationContext(conversation_id=""),
-            ) if context else None
+            entity = None
+            if context and message:
+                entity = resolve_entity_reference(
+                    message=message,
+                    context=context,
+                )
 
             application_id = entity.entity_id if entity and entity.entity_type == "application" else None
             if not application_id:

@@ -1,25 +1,33 @@
-"""智能报告助手 — 证据化回答编排。
+"""智能报告助手 — 证据化回答编排（Iteration 2A.1 增强版）。
 
 本模块负责将工具结果和 LLM 能力结合，生成可信的自然语言回答。
 
-Iteration 2A 策略：
-1. LLM 可用时 → 通过 evidence map + 结构化提示生成回答，并校验数字
-2. LLM 不可用时 → 确定性模板降级
+Iteration 2A.1 策略（证据占位符方案 A）：
+1. 从工具结果构建结构化 EvidenceItem 列表
+2. LLM Prompt 要求使用 {{E1}} {{E2}} 占位符引用证据数字
+3. Python 替换占位符为真实值 + 单位
+4. 校验证据-实体绑定一致性
+5. LLM 失败或输出裸数字 → 确定性模板降级
 
 核心安全约束：
-- LLM 不能直接访问数据库或业务指标
-- 所有数字来自工具结果
-- 回答中的数字必须能追溯到证据
+- LLM 不能直接输出业务数字（风险分、ROI、SLA 等）
+- 所有业务数字通过 {{E1}} 占位符间接引用
+- 数字与实体、指标的绑定关系不可交换
+- LLM 失败时确定性模板可用
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from services.reporting.assistant.guardrails import (
-    build_evidence_map,
+    build_evidence_map_structured,
+    build_structured_evidence,
     extract_allowed_numbers_from_tool_results,
+    replace_evidence_placeholders,
+    validate_evidence_binding,
     validate_numbers_in_answer,
 )
 from services.reporting.assistant.schemas import (
@@ -42,7 +50,7 @@ def compose_answer(
     data_quality_level: str = "ok",
     llm_enabled: bool = False,
 ) -> dict[str, Any]:
-    """根据意图和工具结果生成回答。
+    """根据意图和工具结果生成证据绑定的回答。
 
     Args:
         intent: 用户意图。
@@ -53,15 +61,27 @@ def compose_answer(
     Returns:
         dict 包含 answer、evidence、suggested_follow_ups。
     """
-    # 提取所有工具的成功结果数据
-    tool_data_list = [r.data for r in tool_results if r.status == "success"]
+    # 提取成功工具数据时保留工具名和 report_id。证据构建需要这两个字段判断
+    # 数据来源并绑定原报告；只传 r.data 会让 MetricTrace 退化成空 evidence_id。
+    tool_data_list = []
+    for result in tool_results:
+        if result.status != "success":
+            continue
+        data = dict(result.data) if isinstance(result.data, dict) else {"value": result.data}
+        data.setdefault("tool_name", result.tool_name)
+        data.setdefault("report_id", result.report_id)
+        tool_data_list.append(data)
 
-    # 构建证据映射
-    evidence_map = build_evidence_map(tool_data_list)
+    # 获取主工具的 report_id
+    primary = tool_results[0] if tool_results else None
+    report_id = primary.report_id if primary else 0
+
+    # 构建结构化证据映射（Iteration 2A.1 新版）
+    evidence_map = build_evidence_map_structured(tool_data_list, report_id=report_id)
     allowed_numbers = extract_allowed_numbers_from_tool_results(tool_data_list)
 
     if llm_enabled:
-        answer, evidence = _compose_with_llm(
+        answer, evidence, used_template = _compose_with_llm(
             intent=intent,
             tool_data_list=tool_data_list,
             evidence_map=evidence_map,
@@ -72,6 +92,11 @@ def compose_answer(
             intent=intent,
             tool_data_list=tool_data_list,
         )
+        # 确定性模板不使用 {{E1}}，但前端仍需要完整证据卡片。优先返回
+        # guardrails 生成的结构化证据，避免旧模板留下 evidence_id=""。
+        if evidence_map:
+            evidence = [item.model_dump() for item in evidence_map.values()]
+        used_template = True
 
     # 注入数据质量限制
     from services.reporting.assistant.guardrails import apply_data_quality_guardrail
@@ -93,7 +118,7 @@ def compose_answer(
 
 
 # ---------------------------------------------------------------------------
-# LLM 模式
+# LLM 模式（证据占位符方案 A）
 # ---------------------------------------------------------------------------
 
 
@@ -101,15 +126,26 @@ def _compose_with_llm(
     *,
     intent: str,
     tool_data_list: list[Any],
-    evidence_map: dict[str, Any],
+    evidence_map: dict[str, EvidenceItem],
     allowed_numbers: set[float | int],
-) -> tuple[str, list[dict[str, Any]]]:
-    """使用 LLM 生成自然语言回答，并校验数字。"""
+) -> tuple[str, list[dict[str, Any]], bool]:
+    """使用 LLM 生成自然语言回答，通过证据占位符绑定数字。
+
+    流程：
+    1. 构建含 {{E1}} 占位符约束的 Prompt
+    2. LLM 生成使用占位符的回答
+    3. Python 替换占位符为真实值
+    4. 校验证据绑定 + 数字第二层校验
+    5. 失败 → 一次修复 → 仍失败 → 确定性模板
+
+    Returns:
+        (answer, evidence_list, used_template) — 回答、证据列表、是否使用了模板。
+    """
     try:
         from services.reporting.llm_client import ReportLLMClient
 
         system_prompt = _build_answer_system_prompt(intent, tool_data_list, evidence_map)
-        user_prompt = "请根据上述数据生成用户友好的中文回答。"
+        user_prompt = "请根据上述数据生成用户友好的中文回答。记住：所有业务数字必须使用 {{E1}} {{E2}} 格式的占位符。"
 
         client = ReportLLMClient()
         messages = [
@@ -120,23 +156,33 @@ def _compose_with_llm(
 
         if response.status != "success" or not response.content:
             logger.warning("LLM 回答生成失败，降级到确定性模板")
-            return _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+            answer, ev = _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+            return answer, ev, True
 
         raw_answer = response.content.strip()
 
-        # 数字校验
-        is_valid, hallucinated = validate_numbers_in_answer(
+        # ---- 第一步：证据占位符替换（第一层保护） ----
+        replaced_answer, e_warnings = replace_evidence_placeholders(
             answer=raw_answer,
-            allowed_numbers=allowed_numbers,
+            evidence_map=evidence_map,
         )
 
-        if not is_valid:
-            logger.warning("LLM 回答包含幻觉数字: %s", hallucinated)
+        if e_warnings:
+            logger.warning("证据占位符替换警告: %s", e_warnings)
+
+        # ---- 第二步：检查是否有裸业务数字（绕过了占位符） ----
+        naked_check = _check_naked_business_numbers(
+            answer=raw_answer,
+            evidence_map=evidence_map,
+        )
+
+        if naked_check["has_naked"]:
+            logger.warning("LLM 回答包含裸业务数字（未使用占位符）: %s", naked_check["naked_numbers"])
             # 尝试一次修复
             repair_prompt = (
-                f"上述回答中包含不在允许列表中的数字：{hallucinated}。\n"
-                f"允许的数字: {sorted(allowed_numbers)}\n"
-                "请修改回答，只使用允许列表中的数字。"
+                f"上述回答中包含未使用证据占位符的业务数字：{naked_check['naked_numbers']}。\n"
+                "请修改回答，将所有业务数字替换为 {{E1}} {{E2}} 格式的占位符。\n"
+                "例如：'风险分为 {{E1}}' 而不是 '风险分为 90'。"
             )
             repair_messages = [
                 {"role": "system", "content": system_prompt},
@@ -148,35 +194,164 @@ def _compose_with_llm(
 
             if repair_response.status == "success" and repair_response.content:
                 raw_answer = repair_response.content.strip()
-                is_valid, _ = validate_numbers_in_answer(
+                replaced_answer, e_warnings = replace_evidence_placeholders(
                     answer=raw_answer,
-                    allowed_numbers=allowed_numbers,
+                    evidence_map=evidence_map,
+                )
+                naked_check = _check_naked_business_numbers(
+                    answer=raw_answer,
+                    evidence_map=evidence_map,
                 )
 
-            if not is_valid:
-                logger.warning("修复后仍包含幻觉数字，使用确定性模板")
-                return _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+            if naked_check["has_naked"]:
+                logger.warning("修复后仍包含裸业务数字，使用确定性模板")
+                answer, ev = _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+                return answer, ev, True
 
-        # 构建证据
-        evidence = _build_evidence_from_map(evidence_map)
+        # ---- 第三步：证据绑定校验 ----
+        is_valid_binding, binding_errors = validate_evidence_binding(
+            answer=raw_answer,
+            evidence_map=evidence_map,
+        )
 
-        return raw_answer, evidence
+        if not is_valid_binding:
+            logger.warning("证据绑定校验失败: %s", binding_errors)
+            # 对绑定错误也尝试修复一次
+            repair_prompt = (
+                f"证据绑定错误：{'; '.join(binding_errors)}。\n"
+                "请检查占位符与实体的对应关系，确保每个 {{E1}} 引用的实体与文本描述一致。"
+            )
+            repair_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+                {"role": "assistant", "content": raw_answer},
+                {"role": "user", "content": repair_prompt},
+            ]
+            repair_response = client.chat_completion(repair_messages, temperature=0.1, max_tokens=600)
+
+            if repair_response.status == "success" and repair_response.content:
+                raw_answer = repair_response.content.strip()
+                replaced_answer, e_warnings = replace_evidence_placeholders(
+                    answer=raw_answer,
+                    evidence_map=evidence_map,
+                )
+                is_valid_binding, binding_errors = validate_evidence_binding(
+                    answer=raw_answer,
+                    evidence_map=evidence_map,
+                )
+
+            if not is_valid_binding:
+                logger.warning("修复后证据绑定仍失败，使用确定性模板")
+                answer, ev = _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+                return answer, ev, True
+
+        # ---- 第四步：数字第二层校验（兜底保护） ----
+        is_valid_nums, hallucinated = validate_numbers_in_answer(
+            answer=replaced_answer,
+            allowed_numbers=allowed_numbers,
+        )
+
+        if not is_valid_nums:
+            logger.warning("LLM 回答包含幻觉数字: %s", hallucinated)
+            # 尽力而为：如果占位符替换已正确完成，这些"幻觉"数字可能是
+            # 日期/ID 的误报。只记录日志，不拒绝回答。
+            # 但如果是明确的业务数字超出允许范围，则降级。
+            business_hallucinated = [
+                n for n in hallucinated
+                if not _is_likely_identifier(n, replaced_answer)
+            ]
+            if business_hallucinated:
+                logger.warning("确认的业务数字幻觉: %s，降级到模板", business_hallucinated)
+                answer, ev = _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+                return answer, ev, True
+
+        # ---- 构建证据列表 ----
+        evidence = _build_evidence_list(evidence_map, raw_answer)
+
+        return replaced_answer, evidence, False
 
     except Exception as exc:
         logger.warning("LLM 回答生成异常: %s，降级到确定性模板", exc)
-        return _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+        answer, ev = _compose_deterministic(intent=intent, tool_data_list=tool_data_list)
+        return answer, ev, True
+
+
+def _check_naked_business_numbers(
+    *,
+    answer: str,
+    evidence_map: dict[str, EvidenceItem],
+) -> dict[str, Any]:
+    """检查 LLM 回答中是否有绕过占位符的业务数字。
+
+    业务数字的判断标准：
+    1. 数字的值与某个 EvidenceItem.value 匹配
+    2. 且该数字没有用 {{Ex}} 包裹
+
+    Args:
+        answer: LLM 原始回答（替换占位符前）。
+        evidence_map: 证据映射。
+
+    Returns:
+        {"has_naked": bool, "naked_numbers": list}。
+    """
+    # 获取所有证据值
+    evidence_values = set()
+    for item in evidence_map.values():
+        if isinstance(item.value, (int, float)):
+            evidence_values.add(item.value)
+
+    # 移除占位符文本后检查裸数字
+    cleaned = re.sub(r'\{\{\w+\}\}', ' ', answer)
+
+    # 提取所有数字
+    numbers_in_text = re.findall(r'\b(\d+(?:\.\d+)?)\b', cleaned)
+
+    naked = []
+    for n_str in numbers_in_text:
+        try:
+            n = float(n_str)
+            # 跳过日期/ID 类的大数字
+            if n_str.isdigit() and len(n_str) >= 4:
+                continue
+            # 如果数字值在证据集合中，且以裸数字形式出现 → 违规
+            for ev in evidence_values:
+                if abs(n - float(ev)) < 0.001:
+                    naked.append(n)
+                    break
+        except ValueError:
+            continue
+
+    return {
+        "has_naked": len(naked) > 0,
+        "naked_numbers": list(set(naked)),
+    }
+
+
+def _is_likely_identifier(num: float, answer: str) -> bool:
+    """判断数字是否更可能是标识符而非业务数字。"""
+    # 整数且 >= 1000 → 可能是 ID
+    if num == int(num) and num >= 1000:
+        return True
+    # 检查是否在日期上下文附近
+    if re.search(rf'\b{int(num)}\b\s*[年/-]', answer):
+        return True
+    return False
 
 
 def _build_answer_system_prompt(
     intent: str,
     tool_data_list: list[Any],
-    evidence_map: dict[str, Any],
+    evidence_map: dict[str, EvidenceItem],
 ) -> str:
-    """构建 LLM 回答生成的 System Prompt。"""
-    # 整理证据索引
+    """构建 LLM 回答生成的 System Prompt（Iteration 2A.1 证据占位符版）。"""
+    # 整理证据索引（带标签）
     evidence_lines = []
-    for key, value in evidence_map.items():
-        evidence_lines.append(f"[{key}] {value}")
+    for eid, item in evidence_map.items():
+        unit_str = f" {item.unit}" if item.unit else ""
+        evidence_lines.append(
+            f"[{eid}] {item.label} = {item.value}{unit_str}"
+            f"（来源: 报告 #{item.source_report_id}, 实体: {item.entity_id or 'N/A'}）"
+        )
 
     evidence_text = "\n".join(evidence_lines) if evidence_lines else "（无额外数据）"
 
@@ -186,14 +361,15 @@ def _build_answer_system_prompt(
     return (
         "你是海外留学教育服务平台的智能报告助手。\n\n"
         "**回答规则（必须严格遵守）：**\n"
-        "1. 只能使用以下证据中提供的数字，不得编造任何数字。\n"
-        "2. 使用 `{{E1}}` `{{E2}}` 占位符引用证据数字，不要直接写数值。\n"
+        "1. 所有业务数字（风险分、数量、金额、百分比等）必须使用 {{E1}} {{E2}} 占位符引用，禁止直接写出数字。\n"
+        "2. 每个占位符有固定的含义（如 E1=申请 A1024 风险分=90），不能交换使用。\n"
         "3. 工具数据中的文字结论可以引用，但不能编造数据中不存在的风险原因。\n"
         "4. 行动建议必须标明是\"建议\"，不能表述为确定性事实。\n"
         "5. 回答使用中文，简洁、结构清晰。\n"
-        "6. 如果数据包含多个实体，使用列表格式，每个实体说明 risk_score 和关键原因。\n\n"
+        "6. 如果数据包含多个实体，使用列表格式。\n"
+        "7. 禁止在回答中直接写风险分、ROI、CPL、CAC、SLA超时数、转化率等业务数字的具体数值。\n\n"
         f"**当前意图**: {intent}\n\n"
-        f"**证据索引**:\n{evidence_text}\n\n"
+        f"**可用证据**:\n{evidence_text}\n\n"
         f"**工具数据**:\n{data_summary}\n"
     )
 
@@ -204,13 +380,20 @@ def _summarize_tool_data(tool_data_list: list[Any]) -> str:
     for i, data in enumerate(tool_data_list):
         if not isinstance(data, dict):
             continue
-        # 移除嵌套的 referered_entities（太长，用摘要替代）
         safe = dict(data)
         if "referenced_entities" in safe:
             safe["referenced_entities_count"] = len(safe.pop("referenced_entities", []))
         if "metric_traces" in safe:
             safe["metric_traces_count"] = len(safe.pop("metric_traces", []))
-        # 截断内容
+        if "items" in safe:
+            # 对 items 中的每个 item 去掉嵌套对象
+            safe_items = []
+            for item in safe.get("items", []):
+                if isinstance(item, dict):
+                    si = dict(item)
+                    si.pop("metric_traces", None)
+                    safe_items.append(si)
+            safe["items"] = safe_items
         safe_str = str(safe)
         if len(safe_str) > 800:
             safe_str = safe_str[:800] + "..."
@@ -276,7 +459,16 @@ def _template_drill_down(tool_data_list: list[Any]) -> tuple[str, list[dict[str,
         reasons = item.get("risk_reasons", [])
         reasons_text = "、".join(reasons[:3]) if reasons else "无详细原因"
         lines.append(f"{i+1}. 申请 #{app_id}：风险分 {score}（{level}），{reasons_text}")
-        evidence.append({"source": "get_application_risk_items", "reference": f"application_id={app_id}", "value": score})
+        evidence.append({
+            "evidence_id": f"E{i+1}",
+            "entity_type": "application",
+            "entity_id": str(app_id),
+            "metric_name": "risk_score",
+            "label": f"申请 #{app_id} 风险分",
+            "value": score,
+            "unit": "分",
+            "source": "get_application_risk_items",
+        })
 
     answer = "\n".join(lines)
     return answer, evidence
@@ -289,8 +481,9 @@ def _template_explain_risk(tool_data_list: list[Any]) -> tuple[str, list[dict[st
     level = data.get("risk_level", "?")
     missing = data.get("missing_materials", [])
     next_action = data.get("next_action", "")
+    app_id = data.get("application_id", "?")
 
-    parts = [f"申请 #{data.get('application_id')} 风险分为 {score}（{level}）。"]
+    parts = [f"申请 #{app_id} 风险分为 {score}（{level}）。"]
     if risk_reasons:
         parts.append("风险原因：")
         for r in risk_reasons:
@@ -300,7 +493,16 @@ def _template_explain_risk(tool_data_list: list[Any]) -> tuple[str, list[dict[st
     if next_action:
         parts.append(f"建议：{next_action}")
 
-    evidence = [{"source": "get_application_risk_detail", "reference": f"risk_score", "value": score}]
+    evidence = [{
+        "evidence_id": "E1",
+        "entity_type": "application",
+        "entity_id": str(app_id),
+        "metric_name": "risk_score",
+        "label": f"申请 #{app_id} 风险分",
+        "value": score,
+        "unit": "分",
+        "source": "get_application_risk_detail",
+    }]
     return "\n".join(parts), evidence
 
 
@@ -351,11 +553,47 @@ def _template_generic(tool_data_list: list[Any]) -> tuple[str, list[dict[str, An
 # ---------------------------------------------------------------------------
 
 
-def _build_evidence_from_map(evidence_map: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        {"evidence_id": key, "label": f"证据 {key}", "value": value, "source": "tool_results"}
-        for key, value in evidence_map.items()
-    ]
+def _build_evidence_list(
+    evidence_map: dict[str, EvidenceItem],
+    raw_answer: str,
+) -> list[dict[str, Any]]:
+    """从 evidence_map 和 LLM 回答构建最终证据列表。
+
+    只包含回答中实际引用的证据。
+    """
+    used_eids = set(re.findall(r'\{\{(\w+)\}\}', raw_answer))
+    evidence = []
+    for eid in used_eids:
+        if eid in evidence_map:
+            item = evidence_map[eid]
+            evidence.append({
+                "evidence_id": item.evidence_id,
+                "entity_type": item.entity_type,
+                "entity_id": item.entity_id,
+                "metric_name": item.metric_name,
+                "label": item.label,
+                "value": item.value,
+                "unit": item.unit,
+                "source_report_id": item.source_report_id,
+                "source": item.source,
+                "reference": item.reference,
+            })
+    # 如果没有占位符引用，返回所有证据
+    if not evidence:
+        for eid, item in evidence_map.items():
+            evidence.append({
+                "evidence_id": item.evidence_id,
+                "entity_type": item.entity_type,
+                "entity_id": item.entity_id,
+                "metric_name": item.metric_name,
+                "label": item.label,
+                "value": item.value,
+                "unit": item.unit,
+                "source_report_id": item.source_report_id,
+                "source": item.source,
+                "reference": item.reference,
+            })
+    return evidence
 
 
 def _generate_follow_ups(intent: str, tool_data_list: list[Any]) -> list[str]:

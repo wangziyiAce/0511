@@ -336,7 +336,6 @@ def _detect_multi_turn_intent_keywords(
 
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[0][0]
-    return days[weekday]
 
 
 def _extract_plan_from_llm_response(content: str) -> ReportRequestPlan:

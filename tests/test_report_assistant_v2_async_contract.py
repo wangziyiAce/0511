@@ -17,6 +17,27 @@ from unittest.mock import MagicMock, patch, call
 from services.reporting.orchestrator import ReportTaskCreationResult
 
 
+@pytest.fixture(autouse=True)
+def _isolate_assistant_settings(monkeypatch):
+    """为本模块固定关闭 LLM，避免本地 ``.env`` 改变异步契约测试路径。
+
+    本文件验证的是幂等键、后台任务和多 worker 无状态契约，不应访问真实模型。
+    同时替换意图解析、澄清策略和回答编排读取到的模块级配置，确保测试结果
+    不依赖执行顺序或开发机上的 LLM 开关。
+    """
+    import services.reporting.assistant.answer_composer as answer_module
+    import services.reporting.assistant.clarification as clarification_module
+    import services.reporting.assistant.config as config_module
+    import services.reporting.assistant.intent_parser as intent_module
+    from services.reporting.assistant.config import ReportAssistantSettings
+
+    test_settings = ReportAssistantSettings(enabled=True, llm_enabled=False)
+    monkeypatch.setattr(config_module, "settings", test_settings)
+    monkeypatch.setattr(intent_module, "settings", test_settings)
+    monkeypatch.setattr(clarification_module, "settings", test_settings)
+    monkeypatch.setattr(answer_module, "settings", test_settings, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # 一、幂等链路测试
 # ---------------------------------------------------------------------------

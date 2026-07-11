@@ -237,15 +237,32 @@ class ReportConversationContext(BaseModel):
 
 
 class EvidenceItem(BaseModel):
-    """回答中一个数字或结论的证据来源。
+    """回答中一个数字或结论的证据来源（Iteration 2A.1 增强版）。
 
-    每个 EvidenceItem 必须能从工具结果中定位到具体字段。
-    这保证了"回答中的数字全部可追溯到工具结果"的安全约束。
+    每个 EvidenceItem 建立完整绑定关系：
+    **实体 + 指标 + 数值 + 单位 + 来源证据**
+
+    这个五元绑定保证：
+    1. 模型不能交换两个合法数字的含义（E1=90 不能标注为 risk_count）
+    2. 模型不能将 A1024 的 risk_score 说成 A1058 的
+    3. 所有业务数字必须来自工具结果，不能由 LLM 自由生成
+
+    旧字段（source, reference, value）保留用于简单场景的向后兼容。
     """
 
-    source: str = Field(..., description="来源工具名，如 generate_existing_report")
-    reference: str = Field(..., description="数据路径，如 application_risk.metrics.high_risk_count")
-    value: Any = Field(..., description="引用值（原始类型）")
+    evidence_id: str = Field(default="", description="证据占位符 ID，如 E1、E2")
+    entity_type: Optional[str] = Field(default=None, description="实体类型，如 application")
+    entity_id: Optional[str] = Field(default=None, description="实体 ID，如 A1024")
+    metric_name: Optional[str] = Field(default=None, description="指标名称，如 risk_score")
+    label: str = Field(default="", description="人类可读标签，如 申请 A1024 风险分")
+    value: Any = Field(default=None, description="引用值（原始类型）")
+    unit: Optional[str] = Field(default=None, description="单位，如 分、%、元、天")
+    source_report_id: int = Field(default=0, description="来源报告 ID")
+    source_tables: list[str] = Field(default_factory=list, description="数据来源表")
+    formula: Optional[str] = Field(default=None, description="指标计算公式")
+    # 向后兼容字段
+    source: str = Field(default="", description="来源工具名")
+    reference: str = Field(default="", description="数据路径")
 
 
 # ---------------------------------------------------------------------------

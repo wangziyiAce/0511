@@ -82,8 +82,19 @@ def decide_clarification(
             reason="写操作暂不支持（Iteration 4 实现）",
         )
 
-    # ---- 高置信度 + 报告类型明确 → 直接执行 ----
-    if plan.confidence >= settings.confidence_high and plan.report_type:
+    # ---- 高置信度 + （报告类型明确 或 多轮追问意图） → 直接执行 ----
+    # 多轮追问意图（drill_down/explain_risk 等）不需要 report_type，
+    # 它们使用上下文中已有的 report 信息
+    _MULTI_TURN_INTENTS = {
+        ReportAssistantIntent.DRILL_DOWN,
+        ReportAssistantIntent.EXPLAIN_RISK,
+        ReportAssistantIntent.EXPLAIN_METRIC,
+        ReportAssistantIntent.QUERY_DATA_QUALITY,
+        ReportAssistantIntent.QUERY_REPORT_STATUS,
+    }
+    has_valid_intent = bool(plan.report_type) or plan.intent in _MULTI_TURN_INTENTS
+
+    if plan.confidence >= settings.confidence_high and has_valid_intent:
         return ClarificationDecision(
             needs_clarification=False,
             can_proceed=True,
@@ -92,7 +103,7 @@ def decide_clarification(
         )
 
     # ---- 中置信度 → 用默认值执行但明示假设 ----
-    if plan.confidence >= settings.confidence_low and plan.report_type:
+    if plan.confidence >= settings.confidence_low and has_valid_intent:
         return ClarificationDecision(
             needs_clarification=False,
             can_proceed=True,
