@@ -38,11 +38,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-# --- 项目内部模块 ---
-from config import APP_NAME, APP_VERSION, APP_DEBUG   # 应用元信息
+from config import APP_NAME, APP_VERSION, APP_DEBUG
+from utils.database import init_db
 from routers.crm import crm_router, employee_router
-from utils.database import init_db                     # 数据库建表函数
-from services.crm_service import BizError             # 业务异常基类（统一异常处理）
+from services.crm_service import BizError
+from models.common import BusinessError
 
 
 # ============================================================
@@ -109,15 +109,20 @@ app = FastAPI(
 # ============================================================
 # 业务异常统一处理器
 # ============================================================
-# services/crm_service 中定义的 BizError 及其子类（ParamError / NotFoundError /
-# RefNotFoundError / StateError / ConflictError）统一在此转换为 JSON 错误响应，
-# 保证客户端拿到结构化的 {code, message, data} 以及正确的 HTTP 状态码。
+# 两套异常体系统一处理: BizError(队友) + BusinessError(我的)
 @app.exception_handler(BizError)
 def biz_error_handler(request, exc: BizError):
-    """把业务异常转成统一 JSON 错误体"""
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.code, "message": exc.message, "data": None},
+    )
+
+
+@app.exception_handler(BusinessError)
+def business_error_handler(request, exc: BusinessError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.detail,
     )
 
 
@@ -154,32 +159,30 @@ def health_check():
 
 
 # ============================================================
-# 四、路由注册（后续按模块逐步启用）
+# 四、路由注册
 # ============================================================
-# 每个 routers/ 下的模块定义了一个 APIRouter 实例（router），
-# 在这里通过 app.include_router() 注册到应用上。
-#
-# 模块分工:
-#   routers/user.py    → 用户登录、注册、个人信息管理
-#   routers/crm.py     → 客户线索、跟进记录
-#   routers/chat.py    → 客服对话
-#   routers/profile.py → 客户画像研判
-#   routers/student.py → 学生请假、投诉、心理预警
-#   routers/report.py  → 报告生成与查询
-#   routers/tools.py   → 工具类接口（文件上传、数据导出等）
-#
-# 当前这些路由模块尚未实现，等对应的 services 和 schemas 开发完成后，
-# 取消下面的注释即可启用。
-# ============================================================
+# 基础设施 + 客户研判（我的模块）
+from routers.tools import router as tools_router
 
-# --- 路由注册 ---
+app.include_router(tools_router, prefix="/api/v1", tags=["基础设施"])
+
+from routers import register_routers
+
+register_routers(app)
+
+# 企业助手 / 学生助手 / 智能报告 / 客服Agent（队友模块）
+from routers.assistant import router as assistant_router
+from routers.report import router as report_router
 from routers import student
 from routers import student_chat
 
 app.include_router(crm_router,      prefix="/api/v1/crm",      tags=["企业助手"])
 app.include_router(employee_router, prefix="/api/v1/employee", tags=["员工日报"])
+app.include_router(assistant_router, prefix="/api/v1",          tags=["智能助手"])
 app.include_router(student.router, prefix="/api/v1/student", tags=["学生智能助手"])
 app.include_router(student_chat.router, prefix="/api/v1")
+app.include_router(report_router,    prefix="/api/v1/report",  tags=["智能报告"])
+
 
 
 # ============================================================

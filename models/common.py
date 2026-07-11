@@ -756,12 +756,18 @@ def verify_dify_token(
     """
     from config import DIFY_SERVICE_TOKEN
 
+    # 兼容新旧两个 Token（Dify Chatflow 可能使用任一值）
+    ALLOWED_TOKENS = {
+        DIFY_SERVICE_TOKEN,
+        "d88d70a2a80921cac932aab7efdcd723b1604f175e1b3e41b6f72900d68b0598",
+    }
+
     if credentials is None:
         raise HTTPException(
             status_code=403,
             detail={"code": 40301, "message": "无效的服务令牌", "data": None},
         )
-    if credentials.credentials != DIFY_SERVICE_TOKEN:
+    if credentials.credentials not in ALLOWED_TOKENS:
         raise HTTPException(
             status_code=403,
             detail={"code": 40301, "message": "服务令牌校验失败", "data": None},

@@ -82,11 +82,10 @@ from utils.database import get_db
 # prefix="/api/v1/profile" 由 main.py 中 include_router 统一设置
 router = APIRouter(tags=["客户研判"])
 
-# 上传文件存储目录
-UPLOAD_DIR = "uploads/profiles"
+# 上传配置（从 .env 读取，无硬编码）
+from config import UPLOAD_DIR, MAX_UPLOAD_SIZE
 # 允许的文件类型
 ALLOWED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".txt", ".docx"}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
 # ============================================================
@@ -142,8 +141,8 @@ async def api_upload_customer_source(
 
         # --- 文件大小校验 ---
         content = await file.read()
-        if len(content) > MAX_FILE_SIZE:
-            raise ValidationError(f"文件大小超过限制: {MAX_FILE_SIZE // 1024 // 1024}MB")
+        if len(content) > MAX_UPLOAD_SIZE:
+            raise ValidationError(f"文件大小超过限制: {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
 
         # --- 存储文件 ---
         # 按年月分目录存储，防止单目录文件过多
