@@ -9,6 +9,37 @@
 - 本项目是教学型、就业导向型 FastAPI 后端项目，代码不仅要能运行，还要能帮助其他同学看懂、复盘、排错和面试表达。
 - 变量名、函数名、类名、字段名继续使用英文；解释说明、docstring、关键注释必须使用清晰中文。
 
+### 1.1 项目 AI 架构总览
+
+当前项目 AI 调用分为两层：
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│ 客服 Agent（chat）                                          │
+│ 唯一仍使用 Dify 的模块                                       │
+│ FastAPI → Dify Chatflow / Workflow → 大模型                  │
+│ 原因：多轮对话 + 意图识别 + RAG 检索链路由 Dify 编排            │
+└────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────┐
+│ 其他全部模块 — 纯 Python LLM 直连                             │
+│ ├── 智能报告 V3: ReportLLMClient(openai.OpenAI)             │
+│ │   Prompt Builder → LLM → JSON 解析 → Pydantic 校验 → 修复   │
+│ ├── 企业智能助手: _call_llm (openai SDK)                     │
+│ │   NL2SQL / NL2API / 闲聊                                   │
+│ ├── 口述日报: ReportService → _call_llm                      │
+│ │   口述原文 → 结构化日报                                      │
+│ └── 客户画像: 已迁移为纯 Python（旧 Dify 降级代码仅保留兼容）     │
+└────────────────────────────────────────────────────────────┘
+```
+
+**关键边界**：
+- 新增任何 AI 功能，默认使用纯 Python LLM 直连（`openai` SDK）。
+- 只有客服对话场景可以继续使用 Dify。
+- 不允许在新模块中新增对 `utils/dify_client.py` 的调用。
+- 智能报告模块的 LLM 配置使用 `REPORT_LLM_*` 环境变量（模块内部管理），
+  企业智能助手使用 `LLM_*` 环境变量（config.py 管理），两者命名空间隔离。
+
 ## 2. Superpowers 使用规则
 
 框架搭建、新模块、CRUD、接口开发、业务逻辑、排错、重构，都必须先使用 Superpowers 相关 skill，再进入代码修改。
@@ -185,7 +216,49 @@
 - `utils/`：解释工具函数解决什么通用问题、输入输出、失败时怎么处理。
 - `tests/`：解释测试场景、输入数据、预期结果、为什么这个断言能证明规则正确。
 
-## 6. AI/RAG 链路注释重点
+## 6. AI 调用规则
+
+### 6.1 Dify 使用边界
+
+Dify 只能用于 **客服 Agent（chat）模块**：
+
+- `routers/chat.py` — 客服对话路由，可调用 Dify Chatflow
+- `services/chat_service.py` — 客服对话服务，可调用 Dify
+- `utils/dify_client.py` — Dify 客户端封装，仅供 chat 和旧代码兼容使用
+- `utils/security.py` — `verify_dify_service_token()` 供 Dify HTTP 节点回调鉴权
+
+**以下模块禁止新增 Dify 调用**：
+
+- 智能报告（`services/reporting/`）— 已纯 Python 化，使用 `ReportLLMClient`
+- 企业智能助手（`services/assistant_service.py`）— 使用 `_call_llm`（openai SDK）
+- 口述日报（`services/report_service.py`）— 复用 assistant_service 的 `_call_llm`
+- 客户画像（`services/profile_service.py`）— 已迁移为纯 Python，旧 Dify 降级代码仅保留兼容
+
+### 6.2 纯 Python LLM 调用规范
+
+新增 LLM 调用能力必须遵循以下模式：
+
+```text
+1. Prompt 构建 → 独立函数或模块，不混在调用逻辑中
+2. LLM Client 封装 → 不直接依赖 openai SDK，通过项目内部 Client 调用
+3. JSON 解析 → 支持裸 JSON / 代码块 / 内嵌 JSON 三种格式
+4. Pydantic 校验 → 模型输出必须通过 Schema 校验
+5. 修复重试 → 校验失败时显式传入错误信息，最多重试 1 次
+6. 数据脱敏 → Python 层面字段白名单，不能只靠 Prompt 约束
+7. 日志记录 → 每次调用记录 provider、model、tokens、latency、status
+```
+
+### 6.3 LLM 配置命名空间
+
+| 模块 | 环境变量前缀 | 管理方式 |
+|------|-------------|---------|
+| 智能报告 | `REPORT_LLM_*` | `services/reporting/llm_config.py` 内部管理 |
+| 企业智能助手 / 口述日报 | `LLM_*` | `config.py` 统一管理 |
+| 客服 Agent | `DIFY_*` | `config.py` 统一管理 |
+
+不要混用不同模块的配置变量。
+
+### 6.4 AI/RAG 链路注释重点
 
 后续涉及 AI 应用开发、知识库、RAG、Agent、文件解析、Embedding、向量库、缓存和对象存储时，注释必须体现完整链路位置。
 

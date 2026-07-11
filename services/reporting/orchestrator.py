@@ -95,7 +95,7 @@ def create_report_task(
 ) -> ReportGeneration:
     """创建报告任务记录。
 
-    注意：这里只创建任务，不等待 Dify，也不在请求线程里做重计算。
+    注意：这里只创建任务，不等待 LLM 调用，也不在请求线程里做重计算。
     FastAPI 接口会返回 202，后台任务再调用 ``generate_report_async``。
     """
 
@@ -178,7 +178,7 @@ def generate_report(report_id: int, db: Session) -> ReportGeneration:
             content=aggregated.content,
             data_quality=aggregated.data_quality,
         )
-        # 这里再次用独立 Schema 校验，保证 Dify 或本地解释不会破坏结构。
+        # 再次用独立 Schema 校验，保证 LLM 或本地解释不会破坏结构。
         validated = definition.content_model.model_validate(content)
         content_dict = validated.model_dump(mode="json")
 
