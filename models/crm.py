@@ -39,12 +39,15 @@
   sys_user         (1) ──→ (N) customer_profile   通过 evaluator_id 关联
 """
 
-from datetime import datetime      # Python 日期时间
+from datetime import datetime, date  # Python 日期时间
 from decimal import Decimal        # Python 精确小数（用于金额/评分）
 from typing import Optional        # Optional[X] = X | None
 
 # --- SQLAlchemy 通用类型 ---
 from sqlalchemy import (
+    Column,     # 旧式列定义（用于企业智能助手模块的 Model）
+    BigInteger, # 大整数 → MySQL BIGINT
+    Date,       # 日期   → MySQL DATE
     DateTime,   # 日期时间 → MySQL DATETIME
     Enum,       # 枚举     → MySQL ENUM
     Index,      # 显式索引
@@ -53,6 +56,7 @@ from sqlalchemy import (
     Numeric,    # 定点数   → MySQL DECIMAL（精确到指定小数位）
     String,     # 字符串   → MySQL VARCHAR
     Text,       # 长文本   → MySQL TEXT
+    UniqueConstraint,  # 唯一约束
     func,       # SQL 函数 → func.now() = MySQL NOW()
 )
 
@@ -60,7 +64,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.mysql import BIGINT
 
 # --- ORM 声明式映射 ---
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship, foreign, remote
 
 # --- 导入 ORM 基类 ---
 from utils.database import Base
@@ -582,4 +586,473 @@ class CustomerProfile(Base):
         return (
             f"<CustomerProfile(id={self.id}, customer_name={self.customer_name!r}, "
             f"match_result={self.match_result!r})>"
+        )
+
+
+# ============================================================
+# 四、CrmLead — 意向客户表（企业智能助手模块）
+# ============================================================
+# 表名:   crm_lead
+# 用途:   记录进入企业智能助手流程的意向客户基本信息与销售状态，
+#         贯穿"新客户 → 联系中 → 意向明确 → 已签约 / 已流失"全生命周期。
+#
+# 状态机:
+#   new         = 新客户（默认）
+#   contacting  = 联系中
+#   qualified   = 意向明确
+#   signed      = 已签约（终态，不可回退）
+#   lost        = 已流失（终态，不可回退，必须填 lost_reason）
+#
+# 关联关系（均为逻辑关联，非物理外键）:
+#   crm_lead.owner_employee_id        → sys_user.id（负责员工）
+#   crm_follow_up.lead_id             → crm_lead.id（一对多，跟进记录）
+#
+# 使用场景:
+#   线索录入 → 销售跟进 → 状态流转 → 签约/流失归档，全流程围绕本表展开。
+# ============================================================
+
+class CrmLead(Base):
+    """意向客户表（企业智能助手模块）"""
+
+    __tablename__ = "crm_lead"
+
+    # ========================================
+    # 字段定义
+    # ========================================
+
+    # --- 主键 ---
+    id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        primary_key=True,
+        autoincrement=True,
+        comment="主键",
+    )
+
+    # --- 客户姓名 ---
+    # 必填，客户的关键标识之一。
+    customer_name: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="客户姓名",
+    )
+
+    # --- 联系方式 ---
+    # 手机号或邮箱，用于后续跟进联系。
+    contact_info: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        default=None,
+        comment="联系方式（手机/邮箱）",
+    )
+
+    # --- 性别 ---
+    # 枚举值: M（男）/ F（女）/ U（未知），默认 U。
+    gender: Mapped[Optional[str]] = mapped_column(
+        Enum("M", "F", "U", name="crm_lead_gender"),
+        default="U",
+        comment="性别: M/F/U",
+    )
+
+    # --- 年龄 ---
+    age: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        default=None,
+        comment="年龄",
+    )
+
+    # --- 学历层次 ---
+    # 示例: 高中/本科/硕士/博士，用于客户画像与产品线匹配。
+    education_level: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        default=None,
+        comment="学历层次",
+    )
+
+    # --- 意向国家 ---
+    # 可填多个国家，String(128) 兼容"美国、英国、加拿大"等组合。
+    intended_country: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        default=None,
+        comment="意向国家（多值逗号分隔）",
+    )
+
+    # --- 意向专业 ---
+    intended_major: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        default=None,
+        comment="意向专业",
+    )
+
+    # --- 来源渠道 ---
+    # 记录客户从哪个渠道进入（如官网表单、广告投放、转介绍）。
+    source_channel: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        default=None,
+        comment="来源渠道",
+    )
+
+    # --- 背景信息 ---
+    # 客户详细背景描述，补充结构化字段之外的信息。
+    background_info: Mapped[Optional[str]] = mapped_column(
+        Text,
+        default=None,
+        comment="客户背景与档案",
+    )
+
+    # --- 关联客户画像 ID ---
+    # 逻辑外键 → customer_profile.id，可选；用于打通"客户研判"与"CRM 跟进"两条链路。
+    customer_profile_id: Mapped[Optional[int]] = mapped_column(
+        BIGINT(unsigned=True),
+        default=None,
+        comment="关联客户画像ID",
+    )
+
+    # --- 备注 ---
+    remark: Mapped[Optional[str]] = mapped_column(
+        Text,
+        default=None,
+        comment="备注",
+    )
+
+    # --- 销售状态 ---
+    # 状态机流转见类头注释，默认 new，终态 signed/lost 不可回退。
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="new",
+        comment="状态: new/contacting/qualified/signed/lost",
+    )
+
+    # --- 流失原因 ---
+    # 仅当状态流转到 lost 时填写，记录为何流失。
+    lost_reason: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        default=None,
+        comment="流失原因",
+    )
+
+    # --- 负责员工 ID（逻辑关联 sys_user）---
+    # 逻辑外键 → sys_user.id，不在数据库层面建 FOREIGN KEY，
+    # 由应用层 CrmService 校验员工存在且 user_type='employee'。
+    owner_employee_id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        nullable=False,
+        comment="负责员工ID",
+    )
+
+    # --- 最后联系时间 ---
+    # 每次新增跟进记录时由 CrmService.create_follow_up 同步更新（同事务）。
+    last_contact_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        default=None,
+        comment="最后联系时间",
+    )
+
+    # --- 创建时间 ---
+    # server_default=func.now()：由 MySQL 在 INSERT 时自动填入当前时间。
+    create_time: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间",
+    )
+
+    # --- 更新时间 ---
+    # onupdate=func.now()：每次 UPDATE 时自动刷新为当前时间。
+    update_time: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        comment="更新时间",
+    )
+
+    # ========================================
+    # 关联关系
+    # ========================================
+    # 一对多：一个客户对应多条跟进记录。
+    # lazy="dynamic"：访问 follow_ups 时返回 Query 对象，支持进一步过滤/分页。
+    # primaryjoin：使用逻辑外键显式指定关联条件（项目不使用物理外键）
+    follow_ups = relationship(
+        "CrmFollowUp",
+        back_populates="lead",
+        lazy="dynamic",
+        primaryjoin="CrmLead.id == foreign(CrmFollowUp.lead_id)",
+    )
+
+    # ========================================
+    # 表级约束
+    # ========================================
+    __table_args__ = (
+        # 按状态筛选（如"列出所有 contacting 的客户"）
+        Index("idx_status", "status"),
+        # 按负责员工筛选（如"看某员工名下所有客户"）
+        Index("idx_owner", "owner_employee_id"),
+        # 按关联客户画像筛选
+        Index("idx_customer_profile", "customer_profile_id"),
+        # --- MySQL 表属性 ---
+        {
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+            "mysql_collate": "utf8mb4_unicode_ci",
+            "comment": "意向客户表",
+        },
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<CrmLead(id={self.id}, customer_name={self.customer_name!r}, "
+            f"status={self.status!r})>"
+        )
+
+
+# ============================================================
+# 五、CrmFollowUp — 客户跟进记录表（企业智能助手模块）
+# ============================================================
+# 表名:   crm_follow_up
+# 用途:   记录销售对意向客户的每一次跟进动作，形成客户跟进时间线。
+#
+# 关联关系（均为逻辑关联，非物理外键）:
+#   crm_follow_up.lead_id      → crm_lead.id（所属客户，一对多的"多"方）
+#   crm_follow_up.employee_id  → sys_user.id（跟进员工）
+#
+# 设计说明:
+#   - 仅有 create_time，无 update_time、无软删除字段；
+#     跟进记录创建后不可修改/删除，保证历史跟进的真实性与可追溯性。
+#   - 新增跟进时由 CrmService.create_follow_up 同步刷新
+#     crm_lead.last_contact_time（在同一事务内完成）。
+# ============================================================
+
+class CrmFollowUp(Base):
+    """客户跟进记录表（企业智能助手模块）"""
+
+    __tablename__ = "crm_follow_up"
+
+    # ========================================
+    # 字段定义
+    # ========================================
+
+    # --- 主键 ---
+    id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        primary_key=True,
+        autoincrement=True,
+        comment="主键",
+    )
+
+    # --- 客户 ID（逻辑关联 crm_lead）---
+    # 逻辑外键 → crm_lead.id，由应用层 CrmService 校验客户是否存在。
+    lead_id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        nullable=False,
+        comment="客户ID（逻辑关联 crm_lead.id）",
+    )
+
+    # --- 跟进员工 ID（逻辑关联 sys_user）---
+    # 逻辑外键 → sys_user.id，记录是谁做的这次跟进。
+    employee_id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        nullable=False,
+        comment="跟进员工ID → sys_user（逻辑关联）",
+    )
+
+    # --- 跟进方式 ---
+    # 枚举值: phone/wechat/meeting/email/other，可为空。
+    follow_type: Mapped[Optional[str]] = mapped_column(
+        Enum("phone", "wechat", "meeting", "email", "other",
+             name="crm_follow_up_follow_type"),
+        default=None,
+        comment="跟进方式: phone/wechat/meeting/email/other",
+    )
+
+    # --- 跟进内容 ---
+    # 必填，本次跟进的具体描述。
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="跟进内容",
+    )
+
+    # --- 下一步计划 ---
+    next_plan: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        default=None,
+        comment="下次跟进计划",
+    )
+
+    # --- 创建时间 ---
+    # ⚠️ 此表无 update_time、无软删除，跟进记录创建后不可修改，保证历史真实性。
+    create_time: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间",
+    )
+
+    # ========================================
+    # 关联关系
+    # ========================================
+    # 反向关系：通过 lead 属性访问对应的意向客户。
+    # remote_side：指定 CrmLead.id 是"远程"侧（多对一中被引用的主键）
+    lead = relationship(
+        "CrmLead",
+        back_populates="follow_ups",
+        primaryjoin="remote(CrmLead.id) == foreign(CrmFollowUp.lead_id)",
+    )
+
+    # ========================================
+    # 表级约束
+    # ========================================
+    __table_args__ = (
+        # 查询某客户的所有跟进记录 → WHERE lead_id=X，索引直接定位
+        Index("idx_lead_id", "lead_id"),
+        # 按跟进员工统计工作量
+        Index("idx_employee_id", "employee_id"),
+        # --- MySQL 表属性 ---
+        {
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+            "mysql_collate": "utf8mb4_unicode_ci",
+            "comment": "客户跟进记录表",
+        },
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<CrmFollowUp(id={self.id}, lead_id={self.lead_id}, "
+            f"follow_type={self.follow_type!r})>"
+        )
+
+
+# ============================================================
+# 六、EmployeeDailyReport — 员工日报表（企业智能助手模块）
+# ============================================================
+# 表名:   employee_daily_report
+# 用途:   存储员工每日工作日报，含原始口述、AI 结构化结果、关键进展与风险。
+#
+# 数据流:
+#   1. 员工提交原始内容   → raw_content
+#   2. Dify/AI 结构化     → content / key_progress / risks
+#   3. 管理层汇总查询     → get_summary 按日期/部门统计
+#
+# 关联关系（逻辑关联，非物理外键）:
+#   employee_daily_report.employee_id → sys_user.id（提交员工）
+#
+# 设计说明:
+#   - 仅有 create_time，无 update_time、无软删除；
+#     日报创建后不可修改/删除，保证日报的真实性与可追溯性。
+#   - status 标记日报状态（draft/submitted）。
+#   - uk_employee_date 唯一约束：同一员工同一天只能一条日报，DB 层兜底。
+# ============================================================
+
+class EmployeeDailyReport(Base):
+    """员工日报表（企业智能助手模块）"""
+
+    __tablename__ = "employee_daily_report"
+
+    # ========================================
+    # 字段定义
+    # ========================================
+
+    # --- 主键 ---
+    id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        primary_key=True,
+        autoincrement=True,
+        comment="主键",
+    )
+
+    # --- 员工 ID（逻辑关联 sys_user）---
+    # 逻辑外键 → sys_user.id，由应用层 EmployeeService 校验员工存在。
+    employee_id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        nullable=False,
+        comment="员工ID → sys_user（逻辑关联）",
+    )
+
+    # --- 日报日期 ---
+    # 与 employee_id 组成唯一键 uk_employee_date；不能是未来日期（应用层校验）。
+    report_date: Mapped[date] = mapped_column(
+        Date,
+        nullable=False,
+        comment="日报所属日期",
+    )
+
+    # --- 日报状态 ---
+    # draft=草稿，submitted=已提交；默认 draft。
+    status: Mapped[str] = mapped_column(
+        Enum("draft", "submitted", name="employee_daily_report_status"),
+        nullable=False,
+        default="draft",
+        comment="状态: draft/submitted",
+    )
+
+    # --- 原始内容 ---
+    # 员工口述/原文输入；content 为 AI 结构化后的版本。
+    raw_content: Mapped[Optional[str]] = mapped_column(
+        Text,
+        default=None,
+        comment="原始口述/输入内容",
+    )
+
+    # --- AI 结构化内容 ---
+    # 经 Dify/AI 结构化后的日报正文，必填。
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="AI结构化后的日报文本",
+    )
+
+    # --- 关键进展（JSON 数组）---
+    # JSON 数组：["签约1单", "新增2个意向"]，灵活支持多条进展。
+    key_progress: Mapped[Optional[list]] = mapped_column(
+        JSON,
+        default=None,
+        comment="关键进展数组",
+    )
+
+    # --- 风险项（JSON 数组）---
+    # JSON 数组：["客户A有流失风险", "预算审批卡点"]。
+    risks: Mapped[Optional[list]] = mapped_column(
+        JSON,
+        default=None,
+        comment="风险项数组",
+    )
+
+    # --- 明日计划 ---
+    next_plan: Mapped[Optional[str]] = mapped_column(
+        Text,
+        default=None,
+        comment="明日计划",
+    )
+
+    # --- 创建时间 ---
+    # ⚠️ 此表无 update_time、无软删除，日报创建后不可修改，保证真实可追溯。
+    create_time: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间",
+    )
+
+    # ========================================
+    # 表级约束
+    # ========================================
+    __table_args__ = (
+        # 按日期查询/汇总（管理层 get_summary 最高频查询）
+        Index("idx_report_date", "report_date"),
+        # 唯一约束：同一员工同一天只能有一条日报，数据库层兜底保护
+        UniqueConstraint("employee_id", "report_date", name="uk_employee_date"),
+        # --- MySQL 表属性 ---
+        {
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+            "mysql_collate": "utf8mb4_unicode_ci",
+            "comment": "员工日报表",
+        },
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EmployeeDailyReport(id={self.id}, employee_id={self.employee_id}, "
+            f"report_date={self.report_date!r})>"
         )

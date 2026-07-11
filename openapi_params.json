@@ -1,0 +1,144 @@
+[
+  {
+    "name": "category",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "课程分类",
+      "title": "Category"
+    },
+    "description": "课程分类"
+  },
+  {
+    "name": "keyword",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "关键词搜索",
+      "title": "Keyword"
+    },
+    "description": "关键词搜索"
+  },
+  {
+    "name": "min_price",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "最低价格",
+      "title": "Min Price"
+    },
+    "description": "最低价格"
+  },
+  {
+    "name": "max_price",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "最高价格",
+      "title": "Max Price"
+    },
+    "description": "最高价格"
+  },
+  {
+    "name": "status",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "1=上架 0=下架",
+      "default": 1,
+      "title": "Status"
+    },
+    "description": "1=上架 0=下架"
+  },
+  {
+    "name": "page",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "页码",
+      "default": 1,
+      "title": "Page"
+    },
+    "description": "页码"
+  },
+  {
+    "name": "page_size",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "type": "integer",
+      "maximum": 100,
+      "minimum": 1,
+      "description": "每页条数",
+      "default": 20,
+      "title": "Page Size"
+    },
+    "description": "每页条数"
+  },
+  {
+    "name": "authorization",
+    "in": "header",
+    "required": false,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Authorization"
+    }
+  }
+]
