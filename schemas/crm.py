@@ -218,7 +218,7 @@ class CustomerProfileResponse(BaseModel):
     matched_product: Optional[str] = None
     match_score: Optional[float] = None
     match_reason: Optional[str] = None
-    recommended_programs: Optional[dict] = None
+    recommended_programs: Optional[list] = None
     evaluator_id: Optional[int] = None
     create_time: Optional[datetime] = None
     update_time: Optional[datetime] = None
@@ -243,7 +243,7 @@ class ProfileDetailResponse(BaseModel):
     matched_product: Optional[str] = None
     match_score: Optional[float] = None
     match_reason: Optional[str] = None
-    recommended_programs: Optional[dict] = None
+    recommended_programs: Optional[list] = None
     # 时间
     source_create_time: Optional[datetime] = None
     profile_update_time: Optional[datetime] = None
