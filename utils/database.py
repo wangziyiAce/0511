@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Generator
 
 import bcrypt
@@ -32,6 +33,13 @@ from config import (
     DB_POOL_SIZE,
     DB_POOL_TIMEOUT,
 )
+
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "未配置 DATABASE_URL，也未提供完整的 DB_USER、DB_PASSWORD、DB_NAME；"
+        "请在环境变量或 .env 中设置数据库连接。"
+    )
 
 
 engine = create_engine(
@@ -188,15 +196,23 @@ def init_db() -> None:
     使用 Alembic 或显式 SQL 迁移；本项目同步提供了 ``db_init.sql``。
     """
 
+    # 只在开发环境自动建表；生产环境应由 DBA 或 Alembic 管理。
+    app_env = os.getenv("APP_ENV", "production").lower()
+    if app_env != "development":
+        return
+
+    # 导入所有 Model 模块，触发类定义注册到 Base.metadata。
+    # noqa: F401 — 故意不使用导入的类，只为触发 SQLAlchemy 注册。
+    import models.chat  # noqa: F401
     import models.crm  # noqa: F401
+    import models.knowledge  # noqa: F401
     import models.report  # noqa: F401
+    import models.student  # noqa: F401
     import models.user  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 
-    # 自动补齐所有已存在表中缺失的列（开发期容错）
-    _auto_migrate_missing_columns()
-
+    # 不在启动期执行 ALTER TABLE，避免连接串指向错误数据库时改变既有结构。
     db = SessionLocal()
     try:
         seed_basic_users(db)

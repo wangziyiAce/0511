@@ -239,4 +239,15 @@ ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
 
 # LLM 模型选择: qwen-turbo(极速) / qwen-plus(均衡推荐) / qwen-max(最强)
-LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen-plus")
+Qwen_MODEL: str = os.getenv("Qwen_MODEL", "qwen-plus")
+
+# ============================================================
+# 九、Settings 兼容对象（供 conftest、security 等模块通过属性访问）
+# ============================================================
+from types import SimpleNamespace as _SimpleNamespace
+
+settings = _SimpleNamespace(
+    DIFY_SERVICE_TOKEN=DIFY_SERVICE_TOKEN,
+    APP_ENV=os.getenv("APP_ENV", "development"),
+    APP_DEBUG=APP_DEBUG,
+)
