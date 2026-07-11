@@ -27,6 +27,11 @@
 """
 
 import os  # 读取操作系统环境变量
+from pathlib import Path
+from dotenv import load_dotenv
+
+# 加载 .env 文件
+load_dotenv(Path(__file__).parent / ".env")
 
 
 # ============================================================
@@ -166,3 +171,13 @@ BCRYPT_COST: int = 12
 # 1440 分钟 = 24 小时，对应 API 文档 §4.2
 # 到达过期时间后用户需重新登录
 ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+
+# ============================================================
+# 七、通义千问 (Qwen) 大模型配置
+# ============================================================
+# 阿里云百炼 API Key
+# 申请地址: https://dashscope.console.aliyun.com/
+DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
+
+# LLM 模型选择: qwen-turbo(极速) / qwen-plus(均衡推荐) / qwen-max(最强)
+LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen-plus")

@@ -13,10 +13,10 @@
 
 关键概念:
   会话(Session)  = 一次"数据库对话"。查询、插入、更新、删除都在会话中进行。
-                  会话结束时统一提交（commit）或回滚（rollback），保证数据一致性。
+                 会话结束时统一提交（commit）或回滚（rollback），保证数据一致性。
 
   连接池 = 预创建的一批 TCP 连接。没有连接池的话，每个 HTTP 请求都要重新
-           连接 MySQL（三次握手 + 认证，~50ms），连接池把连接复用起来，大幅提速。
+          连接 MySQL（三次握手 + 认证，~50ms），连接池把连接复用起来，大幅提速。
 
 使用示例:
   from utils.database import SessionLocal
@@ -243,7 +243,7 @@ def init_db() -> None:
     import models.crm      # noqa: F401  注册 profile_rule / customer_source / customer_profile
 
     # ★ 后续新增模块示例（取消注释并替换为实际的模块名）:
-    # import models.student   # noqa: F401
+    import models.student   # noqa: F401
     # import models.knowledge # noqa: F401
     # import models.report    # noqa: F401
 

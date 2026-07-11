@@ -59,14 +59,15 @@ from sqlalchemy.orm import Session
 from config import SECRET_KEY, BCRYPT_COST, ACCESS_TOKEN_EXPIRE_MINUTES
 from utils.database import Base, get_db
 
+from sqlalchemy import BigInteger, Column, DateTime
+
 
 # ============================================================
 # 共享 ORM 基类（供客服 Agent / 企业助手等模块共用）
 # ============================================================
 
-class BigIntPrimaryKey:
-    """统一主键列：BIGINT UNSIGNED NOT NULL AUTO_INCREMENT"""
-    id = Column(BigInteger, primary_key=True, autoincrement=True, comment="主键")
+# 统一 BIGINT 类型别名（供其他模块 Column(BigIntPrimaryKey, ...) 使用）
+BigIntPrimaryKey = BigInteger
 
 
 class TimestampMixin:

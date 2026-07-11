@@ -1,3 +1,14 @@
+from models.student import (
+    StudentInfo,
+    StudentScore,
+    StudentAdminService,
+    StudentPsychProfile,
+    StudentPsychRecord,
+    StudentPsychAlert,
+    StudentFeedbackTicket,
+    ApplicationProgress,
+    AcademicDeadline,
+)
 """客服Agent ORM 模型汇总"""
 from models.user import SysUser
 from models.chat import (
