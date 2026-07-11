@@ -29,11 +29,6 @@ API 文档地址（启动后访问）:
   《教育服务系统_总体架构设计文档_定稿版V1.2》第 7 章 — 后端代码架构
 """
 
-# --- 加载 .env（必须在所有模块导入之前）---
-from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env")
-
 # --- contextlib 标准库 ---
 # asynccontextmanager: 把异步生成器函数变成异步上下文管理器，
 # 用于 FastAPI 的 lifespan（应用生命周期）管理
@@ -159,34 +154,32 @@ def health_check():
 
 
 # ============================================================
-# 四、路由注册
+# 四、路由注册（后续按模块逐步启用）
 # ============================================================
-# 所有业务模块的路由统一通过 routers/__init__.py 的 register_routers() 注册。
-# 当前已注册: 基础设施（auth） + 客户研判（profile）
-# 后续模块在 routers/__init__.py 中取消注释即可启用。
+# 每个 routers/ 下的模块定义了一个 APIRouter 实例（router），
+# 在这里通过 app.include_router() 注册到应用上。
+#
+# 模块分工:
+#   routers/user.py    → 用户登录、注册、个人信息管理
+#   routers/crm.py     → 客户线索、跟进记录
+#   routers/chat.py    → 客服对话
+#   routers/profile.py → 客户画像研判
+#   routers/student.py → 学生请假、投诉、心理预警
+#   routers/report.py  → 报告生成与查询
+#   routers/tools.py   → 工具类接口（文件上传、数据导出等）
+#
+# 当前这些路由模块尚未实现，等对应的 services 和 schemas 开发完成后，
+# 取消下面的注释即可启用。
 # ============================================================
 
 # --- 路由注册 ---
-# 队友注册的企业助手 / 学生助手 / 智能报告 / 客服Agent 路由
-from routers.crm import crm_router, employee_router
-from routers.assistant import router as assistant_router
-from routers.tools import router as tools_router
-from routers.report import router as report_router
 from routers import student
 from routers import student_chat
 
 app.include_router(crm_router,      prefix="/api/v1/crm",      tags=["企业助手"])
 app.include_router(employee_router, prefix="/api/v1/employee", tags=["员工日报"])
-app.include_router(assistant_router, prefix="/api/v1",          tags=["智能助手"])
 app.include_router(student.router, prefix="/api/v1/student", tags=["学生智能助手"])
 app.include_router(student_chat.router, prefix="/api/v1")
-app.include_router(report_router,    prefix="/api/v1/report",  tags=["智能报告"])
-app.include_router(tools_router,    prefix="/api/v1",           tags=["基础设施"])
-
-# 你的客户研判模块 — 使用 routers/__init__.py 中的 register_routers 注册
-from routers import register_routers
-
-register_routers(app)
 
 
 # ============================================================
