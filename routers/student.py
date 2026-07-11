@@ -220,6 +220,10 @@ def list_feedbacks(
 """,
 )
 def record_psych(body: PsychRecordCreate, db: Session = Depends(get_db)):
+    # 兼容 Dify 传入逗号分隔字符串
+    if isinstance(body.trigger_keywords, str):
+        keywords = [k.strip() for k in body.trigger_keywords.split(",") if k.strip()]
+        body = body.model_copy(update={"trigger_keywords": keywords or None})
     svc = StudentService(db)
     result = svc.record_psych(body)
     return _ok(result, "心理记录已保存")
@@ -277,6 +281,27 @@ def list_applications(
 ):
     svc = StudentService(db)
     result = svc.list_applications(student_id, page, page_size)
+    return _paginated(result["items"], result["total"], page, page_size)
+
+
+# =========================================================================
+# 成绩查询
+# =========================================================================
+
+@router.get(
+    "/scores",
+    summary="查询学生成绩 [P1]",
+    description="查询学生各课程成绩，支持按学期筛选。数据来源: student_score 表。",
+)
+def list_scores(
+    student_id: int = Query(..., gt=0, description="学生ID"),
+    semester: str = Query(None, description="学期筛选，如 2025-2026-1"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    svc = StudentService(db)
+    result = svc.list_scores(student_id, semester, page, page_size)
     return _paginated(result["items"], result["total"], page, page_size)
 
 

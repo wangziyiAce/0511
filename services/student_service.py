@@ -17,7 +17,7 @@ from sqlalchemy import update, text
 from fastapi import HTTPException
 
 from models.student import (
-    StudentInfo, StudentAdminService,
+    StudentInfo, StudentScore, StudentAdminService,
     StudentPsychProfile, StudentPsychRecord, StudentPsychAlert,
     StudentFeedbackTicket, ApplicationProgress, AcademicDeadline,
     StudentNotification, StudentIntentTag,
@@ -107,6 +107,10 @@ class StudentService:
             status="pending",
         )
         self.db.add(leave)
+        # 通知班主任（teacher 也是 sys_user，复用 student_notification 表）
+        if info.class_teacher_id:
+            self._push_notification(info.class_teacher_id, "leave_submitted",
+                "新的请假申请", f"学生提交了请假申请，等待审批")
         self._commit()
         self.db.refresh(leave)
         return leave
@@ -363,7 +367,20 @@ class StudentService:
         # 更新画像风险等级
         profile.risk_level = risk_level
 
-        # 高危表达：主动通知学生，班主任/心理老师会介入
+        # 高危/中危：通知班主任介入
+        if risk_level in ("high", "medium") and alert_id:
+            student_info = self.db.query(StudentInfo).filter(
+                StudentInfo.user_id == data.student_id
+            ).first()
+            teacher_id = student_info.class_teacher_id if student_info else None
+            if teacher_id:
+                self._push_notification(
+                    teacher_id, "psych_alert",
+                    f"⚠ 心理预警（{risk_level}）",
+                    f"检测到学生情绪风险：分值{data.emotion_score}，关键词{data.trigger_keywords or '无'}。请及时介入。",
+                    related_type="psych", related_id=alert_id,
+                )
+        # 高危表达：主动通知学生
         if risk_level == "high":
             self._push_notification(
                 data.student_id, "psych_alert",
@@ -456,6 +473,24 @@ class StudentService:
                 ApplicationProgress.student_id == student_id,
             ),
             None, None, ApplicationProgress.update_time, page, page_size,
+        )
+
+    # =========================================================================
+    # 成绩查询
+    # =========================================================================
+
+    def list_scores(
+        self, student_id: int, semester: str = None,
+        page: int = 1, page_size: int = 20
+    ) -> dict:
+        """查询学生成绩，支持按学期筛选"""
+        q = self.db.query(StudentScore).filter(
+            StudentScore.student_id == student_id,
+        )
+        if semester:
+            q = q.filter(StudentScore.semester == semester)
+        return self._paginate(
+            q, None, None, StudentScore.create_time, page, page_size,
         )
 
     # =========================================================================

@@ -168,10 +168,6 @@ class StudentScore(Base, TimestampMixin):
         BigInteger,
         comment="录入人ID → sys_user.id（逻辑关联）"
     )
-    exam_date = Column(
-        String(10),
-        comment="考试日期"
-    )
 
     __table_args__ = (
         Index("idx_student_id", "student_id"),

@@ -264,6 +264,30 @@ class DeadlineListResponse(BaseModel):
 
 
 # =============================================================================
+# 成绩查询 (student_score 表)
+# =============================================================================
+
+class ScoreItemResponse(BaseModel):
+    """学生成绩响应"""
+    id: int
+    student_id: int
+    course_name: str
+    score: Optional[float] = None
+    semester: Optional[str] = None
+    credit: Optional[float] = None
+    create_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ScoreListResponse(BaseModel):
+    """成绩列表"""
+    total: int
+    items: List[ScoreItemResponse]
+
+
+# =============================================================================
 # 通用分页
 # =============================================================================
 
