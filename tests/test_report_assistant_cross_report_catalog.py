@@ -1,9 +1,10 @@
-"""验证跨报告白名单、权限预检和确定性工具预算。"""
+"""验证跨报告白名单、权限预检、确定性工具预算、unsupported_gaps 阻断和空工具拒绝。"""
 
 import pytest
 
 from services.reporting.assistant.cross_report_catalog import (
     CROSS_REPORT_CATALOG,
+    CrossReportDefinition,
     get_cross_report_definition,
     validate_catalog_metric_bindings,
     validate_cross_report_request,
@@ -69,13 +70,17 @@ def test_role_failure_is_fail_closed_without_partial_calls():
 
 
 def test_sensitive_metric_requires_privileged_role_even_if_definition_is_modified():
-    """含敏感指标的组合即使权限检查被绕过，角色不匹配时也必须失败关闭。"""
-    definition = get_cross_report_definition("application_risk", "action_closure")
+    """含敏感指标的组合即使权限检查被绕过，角色不匹配时也必须失败关闭。
+
+    使用 channel_roi+sales_funnel（无 gaps 的可执行组合），以 team_leader 角色
+    （不在 allowed_roles 中）验证角色检查在工作量检查之前生效。
+    """
+    definition = get_cross_report_definition("channel_roi", "sales_funnel")
     assert definition.allowed_roles == ("admin", "manager")
     with pytest.raises(PermissionError):
         validate_cross_report_request(
-            "application_risk", "action_closure", role_code="team_leader",
-            permission_check=lambda _: True, tool_calls=(),
+            "channel_roi", "sales_funnel", role_code="team_leader",
+            permission_check=lambda _: True, tool_calls=(lambda: "ok",),
         )
 
 
@@ -122,15 +127,15 @@ def test_successful_validation_executes_tools_in_order():
     assert results == ("result_a", "result_b")
 
 
-# ── 空工具计划：允许不调用任何工具 ──
-def test_empty_tool_plan_is_allowed():
-    """0 个工具调用不触发预算或权限异常，返回空元组。"""
-    results = validate_cross_report_request(
-        "channel_roi", "sales_funnel", role_code="admin",
-        permission_check=lambda _: True,
-        tool_calls=(),
-    )
-    assert results == ()
+# ── 空工具计划：必须拒绝，不允许进入真实执行流程 ──
+def test_empty_tool_plan_is_rejected():
+    """0 个工具调用不读取任何业务数据，必须在执行前拒绝。"""
+    with pytest.raises(ValueError, match="至少需要"):
+        validate_cross_report_request(
+            "channel_roi", "sales_funnel", role_code="admin",
+            permission_check=lambda _: True,
+            tool_calls=(),
+        )
 
 
 # ── 工具执行顺序稳定性：多次相同输入产生相同输出顺序 ──
@@ -184,7 +189,7 @@ def test_permission_denial_message_does_not_leak_report_existence():
         validate_cross_report_request(
             "channel_roi", "sales_funnel", role_code="admin",
             permission_check=permission_check,
-            tool_calls=(),
+            tool_calls=(lambda: "ok",),  # 非空工具计划才能到达权限检查层
         )
     message = str(exc_info.value)
     # 不应在错误消息中列出具体被拒报告名
@@ -222,3 +227,59 @@ def test_every_catalog_entry_declares_explicit_tool_budget():
     assert budgets[frozenset(("sales_funnel", "customer_ops"))] == 2
     assert budgets[frozenset(("application_risk", "action_closure"))] == 2
     assert budgets[frozenset(("channel_roi", "sales_funnel"))] == 2
+
+
+# ── unsupported_gaps 阻断：单侧空指标的组合必须在工具调用前拒绝 ──
+@pytest.mark.parametrize("left,right,expected_gap_keyword", [
+    ("complaint_weekly", "service_sla", "complaint_weekly"),
+    ("sales_funnel", "customer_ops", "customer_ops"),
+    ("application_risk", "action_closure", "action_closure"),
+])
+def test_unsupported_gaps_blocks_execution(left: str, right: str, expected_gap_keyword: str):
+    """存在 unsupported_gaps 的组合必须在调用任何业务工具前被拒绝。
+
+    不得只读取组合中有指标的一侧并返回部分跨报告分析。
+    """
+    definition = get_cross_report_definition(left, right)
+    # gap 信息必须在定义中可查
+    assert len(definition.unsupported_gaps) > 0
+    # 但 validate 层必须在工具执行前拒绝
+    with pytest.raises(ValueError, match="暂不可执行"):
+        validate_cross_report_request(
+            left, right, role_code="admin",
+            permission_check=lambda _: True,
+            tool_calls=(lambda: "called",),
+        )
+
+
+# ── 无 gaps 组合：唯一可执行的跨报告对 ──
+def test_no_gaps_pair_is_executable_with_valid_tools():
+    """channel_roi+sales_funnel 无 unsupported_gaps，应在权限和预算通过后正常执行。"""
+    definition = get_cross_report_definition("channel_roi", "sales_funnel")
+    assert definition.unsupported_gaps == ()
+
+    call_log: list[str] = []
+    results = validate_cross_report_request(
+        "channel_roi", "sales_funnel", role_code="admin",
+        permission_check=lambda _: True,
+        tool_calls=(
+            lambda: call_log.append("t1") or "r1",
+            lambda: call_log.append("t2") or "r2",
+        ),
+    )
+    assert call_log == ["t1", "t2"]
+    assert results == ("r1", "r2")
+
+
+# ── 不可执行组合的角色/权限检查在 gaps 阻断之后 ──
+def test_gaps_checked_before_role_and_permission():
+    """unsupported_gaps 检查必须在角色和权限检查之前执行，
+    确保不可执行组合不会因检查顺序差异而泄露任何信息。
+    """
+    with pytest.raises(ValueError, match="暂不可执行"):
+        validate_cross_report_request(
+            "complaint_weekly", "service_sla",
+            role_code="employee",  # 即使角色不对，gaps 阻断优先
+            permission_check=lambda _: True,
+            tool_calls=(lambda: "ok",),
+        )

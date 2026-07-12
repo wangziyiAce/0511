@@ -123,12 +123,33 @@ def validate_cross_report_request(
 ) -> tuple[_T, ...]:
     """预检整个请求后按固定列表执行工具，不允许 LLM 临时追加或递归选择。
 
-    任一角色、报告权限或预算检查失败时，函数在首次业务调用前抛出异常，因此不会泄露
-    部分数据。成功时返回与 ``tool_calls`` 相同顺序的结果，供后续四段回答组合使用。
+    检查顺序（按安全优先级排列，每层都在业务调用前 fail-closed）：
+    1. 组合是否开放（``get_cross_report_definition``）
+    2. 组合是否可执行（``unsupported_gaps`` 非空则拒绝，避免单侧空指标的部分分析）
+    3. 角色是否满足定义的最低要求
+    4. 工具计划是否为空（空计划意味着没有任何业务数据被读取，不应进入真实执行）
+    5. 工具数量是否在预算内
+    6. 涉及的两份报告是否逐一通过权限检查
+
+    任一检查失败时，函数在首次业务调用前抛出异常，因此不会泄露部分数据。
+    成功时返回与 ``tool_calls`` 相同顺序的结果，供后续四段回答组合使用。
     """
     definition = get_cross_report_definition(left_report_type, right_report_type)
+
+    # 组合存在单侧无注册指标时立即拒绝，避免只读取有指标一侧返回部分分析。
+    if definition.unsupported_gaps:
+        raise ValueError(
+            f"跨报告组合 {definition.report_types[0]}+{definition.report_types[1]} 暂不可执行："
+            + "; ".join(definition.unsupported_gaps)
+        )
+
     if role_code not in definition.allowed_roles:
         raise PermissionError("当前角色无权执行该跨报告分析")
+
+    # 空工具计划不会读取任何业务数据，必须拒绝。
+    if len(tool_calls) == 0:
+        raise ValueError("跨报告分析至少需要一个业务工具，收到空工具计划")
+
     if len(tool_calls) > definition.max_business_tool_calls:
         raise ValueError(f"超过业务工具调用上限 {definition.max_business_tool_calls}")
 
