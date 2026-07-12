@@ -10,7 +10,8 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { FileText, Plus } from 'lucide-react'
+import { FileText, Plus, Bot } from 'lucide-react'
+import { ReportAssistantPanel } from '@/components/report-assistant'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -28,6 +29,7 @@ export default function ReportListPage() {
   const [page, setPage] = useState(1)
   const [reportType, setReportType] = useState<string>('')
   const [statusFilter, setStatusFilter] = useState<string>('')
+  const [assistantOpen, setAssistantOpen] = useState(false)
   const pageSize = 20
 
   // 获取报告类型列表（用于筛选下拉）
@@ -52,17 +54,23 @@ export default function ReportListPage() {
   return (
     <div>
       <PageHeader title="报告列表" description="查看和管理所有智能报告生成记录">
-        <Button onClick={() => navigate('/reports/generate')}>
-          <Plus className="mr-2 h-4 w-4" />
-          生成报告
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setAssistantOpen(true)}>
+            <Bot className="mr-2 h-4 w-4" />
+            智能助手
+          </Button>
+          <Button onClick={() => navigate('/reports/generate')}>
+            <Plus className="mr-2 h-4 w-4" />
+            生成报告
+          </Button>
+        </div>
       </PageHeader>
 
       {/* 筛选栏 */}
       <Card className="mb-4">
-        <CardContent className="flex items-center gap-4 pt-4">
+        <CardContent className="flex flex-col gap-3 pt-4 sm:flex-row sm:flex-wrap sm:items-center">
           <Select value={reportType} onValueChange={(v) => { setReportType(v); setPage(1) }}>
-            <SelectTrigger className="w-48">
+            <SelectTrigger className="w-full sm:w-48">
               <SelectValue placeholder="全部报告类型" />
             </SelectTrigger>
             <SelectContent>
@@ -74,7 +82,7 @@ export default function ReportListPage() {
           </Select>
 
           <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(1) }}>
-            <SelectTrigger className="w-36">
+            <SelectTrigger className="w-full sm:w-36">
               <SelectValue placeholder="全部状态" />
             </SelectTrigger>
             <SelectContent>
@@ -148,6 +156,12 @@ export default function ReportListPage() {
           </Table>
         </Card>
       )}
+
+      {/* 智能报告助手面板 */}
+      <ReportAssistantPanel
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+      />
 
       {/* 分页 */}
       {data && data.total > pageSize && (

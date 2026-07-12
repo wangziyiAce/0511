@@ -87,6 +87,30 @@ class TestLLMResponse:
 
 
 class TestReportLLMClient:
+    def test_chat_completion_can_request_plain_text(self, monkeypatch):
+        """回答生成场景可关闭 JSON mode，避免供应商拒绝普通文本提示词。"""
+        monkeypatch.setenv("REPORT_LLM_API_KEY", "sk-test-key")
+
+        from services.reporting.llm_config import ReportLLMSettings
+        import services.reporting.llm_client as lc_module
+
+        monkeypatch.setattr(
+            lc_module,
+            "settings",
+            ReportLLMSettings(api_key="sk-test-key", timeout=10, max_retries=0),
+        )
+        mock_cls, mock_client = _make_mock_openai([_success_response("普通中文回答")])
+
+        with patch("openai.OpenAI", mock_cls):
+            response = ReportLLMClient().chat_completion(
+                messages=[{"role": "user", "content": "请解释风险"}],
+                json_mode=False,
+            )
+
+        assert response.content == "普通中文回答"
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        assert "response_format" not in call_kwargs
+
     def test_chat_completion_success(self, monkeypatch):
         """正常调用返回 LLMResponse。"""
         monkeypatch.setenv("REPORT_LLM_API_KEY", "sk-test-key")

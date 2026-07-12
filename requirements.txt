@@ -1,32 +1,121 @@
-# Web runtime
+# ============================================================
+# 教育服务系统 — Python 依赖清单
+# ============================================================
+# 安装方式（在项目根目录下执行）:
+#   pip install -r requirements.txt
+#
+# 如果网络慢，可以使用国内镜像源:
+#   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 版本号说明:
+#   >= 表示最低版本（兼容未来小版本升级）
+#   不锁定死版本号是因为 MVP 阶段快速迭代，兼容性优先
+# ============================================================
+
+# ========================================
+# Web 框架
+# ========================================
+# FastAPI: 高性能 Python Web 框架，自带 Swagger 文档生成。
+# 比 Flask 快很多（异步支持），比 Django 轻量（不捆绑 ORM/模板引擎）。
 fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
+
+# python-multipart: FastAPI 解析 multipart/form-data 的依赖。
+# 客户资料上传接口同时接收文件与表单字段；缺少它时，路由在导入阶段就会失败。
 python-multipart>=0.0.9
 
-# Database and validation
+# Uvicorn: ASGI 服务器，运行 FastAPI 应用的引擎。
+# [standard] 额外安装了 uvloop（高性能事件循环）和 httptools（HTTP 解析器）。
+# 启动命令: uvicorn main:app --reload
+uvicorn[standard]>=0.30.0
+
+# ========================================
+# 数据库（MySQL 8.0 + SQLAlchemy ORM）
+# ========================================
+# SQLAlchemy: Python 最流行的 ORM 框架。
+# 2.0 版本大幅改进了类型提示和异步支持。
+# 本系统使用同步模式（MVP 阶段降低复杂度）。
 sqlalchemy>=2.0.30
+
+# PyMySQL: 纯 Python 的 MySQL 客户端库。
+# 免编译、跨平台，安装不依赖系统 C 库。
+# 备选方案: mysqlclient（C 扩展，更快但需编译）、aiomysql（异步驱动）
 pymysql>=1.1.0
-pydantic>=2.7.0
-python-dotenv>=1.0.0
 
-# Authentication and security
-bcrypt>=4.1.0
-python-jose[cryptography]>=3.3.0
-
-# External services and document parsing
-httpx>=0.27.0
-# LLM 直连 — OpenAI SDK 兼容所有 OpenAI 协议的 LLM 服务
-openai>=1.50,<2.0
-
-# 文档解析
+# ========================================
+# 文件解析（客户研判 — PDF / Excel 内容提取）
+# ========================================
+# PyPDF2: 读取 PDF 文件文本内容，用于客户简历解析
 PyPDF2>=3.0.0
+# openpyxl: 读取 Excel (.xlsx) 文件，用于客户批量导入
 openpyxl>=3.1.0
 
-# 智能报告调度与模板
+# ========================================
+# 数据校验
+# ========================================
+# Pydantic: FastAPI 的数据校验引擎。
+# 定义请求/响应的数据结构（Schema），自动校验类型和格式。
+# FastAPI 强依赖 Pydantic，版本需与 FastAPI 匹配。
+pydantic>=2.7.0
+
+# ========================================
+# 密码安全
+# ========================================
+# bcrypt: 密码哈希算法，业界公认安全。
+# 自带盐值（salt），防彩虹表攻击。
+# 成本因子设为 12，可根据服务器性能调整（见 config.py）。
+bcrypt>=4.1.0
+
+# ========================================
+# JWT 鉴权
+# ========================================
+# python-jose: JSON Web Token 的 Python 实现。
+# [cryptography] 使用 cryptography 库做签名/验证，安全性更高。
+# 用于: 用户登录后颁发 Token，后续请求携带 Token 验证身份。
+python-jose[cryptography]>=3.3.0
+
+# ========================================
+# HTTP 客户端（调用外部 API）
+# ========================================
+# httpx: 现代 Python HTTP 客户端，支持同步和异步。
+# 用于调用 Dify API（AI 对话、工作流触发）。
+# 选择 httpx 而非 requests 是因为它同时支持同步和异步调用，
+# 后续升级到异步时不需要换库。
+httpx>=0.27.0
+
+# ========================================
+# LLM 直连（企业智能助手 — 替代 Dify 的 AI 能力）
+# ========================================
+# openai: OpenAI 官方 SDK，兼容所有 OpenAI 协议的 LLM 服务。
+# 用于企业智能助手的意图识别、NL2SQL、NL2API 等功能。
+# 支持 OpenAI / DeepSeek / Ollama 等兼容接口的服务。
+openai>=1.30.0
+
+# ========================================
+# 环境变量管理
+# ========================================
+# python-dotenv: 从 .env 文件加载环境变量。
+# 开发时把数据库密码、API Key 等敏感信息写在 .env 文件中，
+# 这个库自动读取并设置到 os.environ。
+# ⚠️ .env 文件绝对不能提交到 Git！
+python-dotenv>=1.0.0
+
+# ========================================
+# 智能报告 V2：定时调度、模板与测试
+# ========================================
+# APScheduler: 独立报告调度进程，支持 cron、coalesce、max_instances。
 apscheduler>=3.10.4
+
+# Jinja2: 后续可替换当前轻量字符串模板，实现更强的 HTML 模板渲染。
 jinja2>=3.1.4
 
-# Tests
+# pytest / pytest-cov / respx: 报告规则、Schema、LLM 调用 Mock 和覆盖率统计。
 pytest>=8.0.0
 pytest-cov>=5.0.0
 respx>=0.21.0
+
+# ========================================
+# 大模型 API 客户端（智能报告模块纯 Python LLM 调用）
+# ========================================
+# OpenAI Python SDK: 兼容 OpenAI / DeepSeek / Qwen Chat Completions API。
+# max_retries=0 关闭 SDK 重试，由 ReportLLMClient 统一控制指数退避。
+openai>=1.50,<2.0

@@ -15,14 +15,15 @@ interface PageHeaderProps {
 
 export default function PageHeader({ title, description, children, className }: PageHeaderProps) {
   return (
-    <div className={cn('mb-6 flex items-start justify-between', className)}>
+    <header className={cn('editorial-header mb-6', className)}>
       <div>
-        <h1 className="text-xl font-bold text-foreground">{title}</h1>
+        <p className="editorial-kicker">Service archive</p>
+        <h1 className="editorial-title">{title}</h1>
         {description && (
-          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+          <p className="editorial-description">{description}</p>
         )}
       </div>
-      {children && <div className="flex items-center gap-3">{children}</div>}
-    </div>
+      {children && <div className="flex flex-wrap items-center gap-3">{children}</div>}
+    </header>
   )
 }

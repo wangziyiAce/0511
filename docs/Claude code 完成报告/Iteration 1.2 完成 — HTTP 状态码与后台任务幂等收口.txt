@@ -1,0 +1,180 @@
+● ---
+  Iteration 1.2 完成 — HTTP 状态码与后台任务幂等收口
+
+  1. HTTP 状态码修复方式
+
+  在 routers/report_assistant.py 中注入 fastapi.Response 对象，根据 result.status 动态设置 response.status_code，而非在 @router.post 装饰器上使用固定的 status_code。
+
+  def handle_assistant_message(
+      request: ReportAssistantMessageRequest,
+      response: Response,  # 新增
+      background_tasks: BackgroundTasks,
+      ...
+  ):
+      result = service.handle_message(...)
+
+      if result.status == "generating":
+          response.status_code = status.HTTP_202_ACCEPTED
+      elif result.status == "permission_denied":
+          response.status_code = status.HTTP_403_FORBIDDEN
+      else:
+          response.status_code = status.HTTP_200_OK
+
+      return result
+
+  2. 不同 assistant status 对应的 HTTP 状态码
+
+  ┌─────────────────────┬───────────────┬────────────────────────────┐
+  │  Assistant status   │  HTTP 状态码  │            说明            │
+  ├─────────────────────┼───────────────┼────────────────────────────┤
+  │ generating          │ 202 Accepted  │ 任务已创建，后台异步生成中 │
+  ├─────────────────────┼───────────────┼────────────────────────────┤
+  │ completed           │ 200 OK        │ 幂等命中已完成任务         │
+  ├─────────────────────┼───────────────┼────────────────────────────┤
+  │ needs_clarification │ 200 OK        │ 需要用户进一步澄清         │
+  ├─────────────────────┼───────────────┼────────────────────────────┤
+  │ permission_denied   │ 403 Forbidden │ 无权限访问（新增）         │
+  ├─────────────────────┼───────────────┼────────────────────────────┤
+  │ error               │ 200 OK        │ 服务内部错误               │
+  └─────────────────────┴───────────────┴────────────────────────────┘
+
+  对比 Iteration 1.1：所有状态都返回 200，实际语义丢失。
+
+  3. 如何判断任务是新创建还是幂等命中
+
+  在 tools.py 的 tool_generate_existing_report() 中，调用 create_report_task() 之前执行幂等键 pre-check：
+
+  created = True
+  if idempotency_key:
+      existing = db.query(ReportGeneration).filter_by(
+          idempotency_key=idempotency_key
+      ).first()
+      if existing is not None:
+          created = False
+
+  report = create_report_task(...)
+
+  return AssistantToolResult(data={
+      ...
+      "created": created,  # 新增标志
+      ...
+  })
+
+  service.py 使用此标志决定是否注册后台任务：
+  is_new = task_data.get("created", False)
+  task_status = task_data.get("status", "unknown")
+
+  if is_new and task_status == "pending" and background_tasks is not None:
+      background_tasks.add_task(generate_report_async, tool_result.report_id)
+
+  4. 各状态是否注册后台任务
+
+  ┌──────────┬─────────┬────────────┬────────────────┬────────────────────────┐
+  │   场景   │ created │   status   │ 注册后台任务？ │          说明          │
+  ├──────────┼─────────┼────────────┼────────────────┼────────────────────────┤
+  │ 新创建   │ True    │ pending    │       是       │ 首次创建，需要后台生成 │
+  ├──────────┼─────────┼────────────┼────────────────┼────────────────────────┤
+  │ 幂等命中 │ False   │ pending    │       否       │ 已有任务在队列中       │
+  ├──────────┼─────────┼────────────┼────────────────┼────────────────────────┤
+  │ 幂等命中 │ False   │ generating │       否       │ 正在生成中             │
+  ├──────────┼─────────┼────────────┼────────────────┼────────────────────────┤
+  │ 幂等命中 │ False   │ completed  │       否       │ 已完成的报告           │
+  ├──────────┼─────────┼────────────┼────────────────┼────────────────────────┤
+  │ 幂等命中 │ False   │ failed     │       否       │ 应通过 retry 流程重试  │
+  └──────────┴─────────┴────────────┴────────────────┴────────────────────────┘
+
+  5. 重复请求的数据库记录数
+
+  由 create_report_task() 内部的 DB UNIQUE INDEX 保证：相同 idempotency_key 只产生一条 report_generation 记录。测试验证：两次相同幂等请求 → 数据库只有一条任务记录。
+
+  6. 重复请求的后台任务注册次数
+
+  由 tools.py pre-check + service.py created 标志双重保证：最多注册 1 次。测试验证：第一次 created=True → 注册；第二次 created=False → 跳过。
+
+  7. 是否修改 orchestrator
+
+  未修改。create_report_task()、generate_report()、generate_report_async() 均保持不变。tools.py 在调用 create_report_task() 之前自行执行 pre-check，不侵入
+  orchestrator 契约。
+
+  8. 修改文件清单
+
+  ┌────────────────────────────────────────────────────────┬──────┬───────────────────────────────────────────────┐
+  │                          文件                          │ 操作 │                     说明                      │
+  ├────────────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┤
+  │ services/reporting/assistant/tools.py                  │ 修改 │ 增加幂等键 pre-check + created 标志           │
+  ├────────────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┤
+  │ services/reporting/assistant/service.py                │ 修改 │ 使用 created 标志替代 status 判断注册后台任务 │
+  ├────────────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┤
+  │ services/reporting/assistant/schemas.py                │ 修改 │ status Literal 增加 permission_denied         │
+  ├────────────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┤
+  │ routers/report_assistant.py                            │ 修改 │ 注入 Response，动态设置 HTTP 状态码           │
+  ├────────────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┤
+  │ tests/test_report_assistant_v2_http_and_idempotency.py │ 新增 │ 12 个测试                                     │
+  ├────────────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┤
+  │ tests/test_report_assistant_v2_async_contract.py       │ 修改 │ FakeDB 增加 query 方法适配 pre-check          │
+  ├────────────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┤
+  │ tests/test_report_assistant_service.py                 │ 修改 │ 断言兼容 permission_denied 状态               │
+  └────────────────────────────────────────────────────────┴──────┴───────────────────────────────────────────────┘
+
+  9. 新增测试清单
+
+  ┌────────────────────────────────────────────────────────────┬──────────────────────────────┐
+  │                            测试                            │           验证内容           │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_generating_returns_http_202                           │ generating → HTTP 202        │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_completed_returns_http_200                            │ completed → HTTP 200         │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_clarification_returns_http_200                        │ clarification → HTTP 200     │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_permission_denied_returns_http_403                    │ permission_denied → HTTP 403 │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_error_returns_http_200                                │ error → HTTP 200             │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_new_pending_registers_one_background_task             │ 新创建 → 注册 1 次           │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_duplicate_pending_registers_no_second_background_task │ 幂等命中 pending → 不注册    │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_duplicate_generating_registers_no_background_task     │ 幂等命中 generating → 不注册 │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_duplicate_completed_registers_no_background_task      │ 幂等命中 completed → 不注册  │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_duplicate_failed_registers_no_background_task         │ 幂等命中 failed → 不注册     │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_two_duplicate_requests_schedule_generation_only_once  │ 两次相同请求 → 只调度 1 次   │
+  ├────────────────────────────────────────────────────────────┼──────────────────────────────┤
+  │ test_concurrent_duplicate_requests_at_most_one_scheduled   │ 并发请求 → 最多调度 1 次     │
+  └────────────────────────────────────────────────────────────┴──────────────────────────────┘
+
+  10. 全部测试结果
+
+  tests/test_report_assistant_*.py          → 150 passed
+  tests/test_reporting_v2_contracts.py      →  11 passed
+  tests/test_reporting_v2_rules.py          →   9 passed
+  tests/test_reporting_v2_ai_generator.py   →   5 passed
+  ─────────────────────────────────────────────────
+  Total (assistant + reporting):             153 passed, 2 skipped
+
+  11. 已知竞争条件
+
+  pre-check 与 create_report_task 之间的窗口：
+
+  tools.py: existing = db.query(...).first()   ← 线程 A: found None
+  tools.py: existing = db.query(...).first()   ← 线程 B: found None (A 还没 commit)
+  tools.py: create_report_task(...)             ← 线程 A: db.add + db.commit ✅
+  tools.py: create_report_task(...)             ← 线程 B: UNIQUE INDEX 冲突 → 返回已有记录
+
+  两个线程都通过 pre-check（created=True），都会注册后台任务。但：
+  - 数据层安全：DB UNIQUE INDEX 保证只有一条记录
+  - 调度层安全：generate_report_async 内部 generate_report() 先检查 status（pending→generating），第二次调用时状态已是 generating，不会重复执行
+
+  12. 是否建议进入 Iteration 2
+
+  建议进入 Iteration 2。Iteration 1.2 完成了 HTTP 状态码契约收口和幂等调度安全加固。Iteration 2 可以开始实现产品能力：
+  - 实体引用（context.py）
+  - 报告详情查询工具（get_report_detail）
+  - 指标追溯工具（get_metric_trace）
+  - LLM 自然语言回答
+
+  ---
+  Iteration 1.2 完成。未进入 Iteration 2，等待人工确认。

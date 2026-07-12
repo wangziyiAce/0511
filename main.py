@@ -1,101 +1,190 @@
-"""教育服务系统 FastAPI 统一入口。
+"""
+教育服务系统 — FastAPI 应用主入口
+===========================================
+这是整个后端服务的启动文件。FastAPI 应用从这里初始化，
+包括: 数据库自动建表、路由注册、生命周期管理。
 
-该文件合并 GitHub 最新业务模块与本地客服 Agent 模块，负责应用生命周期、
-统一异常处理、健康检查和全部业务路由注册。
+启动方式（在项目根目录下执行）:
+  # 开发模式（修改代码自动重启）:
+  uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # 生产模式（不自动重启）:
+  uvicorn main:app --host 0.0.0.0 --port 8000
+
+  # 指定 workers 数量（利用多核 CPU）:
+  uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+
+API 文档地址（启动后访问）:
+  Swagger UI:  http://localhost:8000/docs       （交互式，可以直接在网页上测试接口）
+  ReDoc:       http://localhost:8000/redoc       （更适合阅读，排版更美观）
+
+项目架构（分层设计）:
+  请求 → routers/（路由层: 定义 URL 和 HTTP 方法）
+       → services/（业务层: 核心逻辑、校验、外部调用）
+       → models/（数据层: ORM 模型定义）
+       → utils/database.py（数据库连接）
+       → MySQL
+
+参考文档:
+  《教育服务系统_总体架构设计文档_定稿版V1.2》第 7 章 — 后端代码架构
 """
 
+# --- contextlib 标准库 ---
+# asynccontextmanager: 把异步生成器函数变成异步上下文管理器，
+# 用于 FastAPI 的 lifespan（应用生命周期）管理
 from contextlib import asynccontextmanager
 
+# --- FastAPI 框架 ---
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from config import APP_DEBUG, APP_NAME, APP_VERSION
-from models.common import BusinessError as CommonBusinessError
-from routers.assistant import router as assistant_router
-from routers.chat import router as chat_router
-from routers.crm import crm_router, employee_router
-from routers.profile import router as profile_router
-from routers.report import router as report_router
-from routers.student import router as student_router
-from routers.student_chat import router as student_chat_router
-from routers.tools import router as tools_router
-from services.crm_service import BizError
+from config import APP_NAME, APP_VERSION, APP_DEBUG
 from utils.database import init_db
-from utils.exceptions import BusinessError as AgentBusinessError
+from services.crm_service import BizError
+from models.common import BusinessError
 
+
+# ============================================================
+# 一、应用生命周期管理（lifespan）
+# ============================================================
+# FastAPI 的 lifespan 是一个异步上下文管理器，管理应用的"出生"到"死亡"。
+#
+# 启动阶段（yield 之前）:
+#   调用 init_db() 创建所有数据库表（已存在的则跳过）。
+#   如果将来需要预热缓存、加载配置等，也在这里做。
+#
+# 运行阶段（yield 期间）:
+#   应用正常接受 HTTP 请求。
+#
+# 关闭阶段（yield 之后）:
+#   应用关闭时执行清理工作，如关闭数据库连接池、停止定时任务等。
+#   当前 MVP 阶段无需特殊清理（SQLAlchemy 连接池会自动释放）。
+# ============================================================
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    """应用启动时初始化已注册模型，关闭时交还控制权。"""
+async def lifespan(app: FastAPI):
+    """
+    管理 FastAPI 应用的生命周期: 启动时初始化，关闭时清理。
 
+    参数 app 是 FastAPI 实例（下面创建的那个），由框架自动传入。
+    """
+    # ===== 应用启动时执行 =====
+    # 创建所有 ORM Model 对应的数据库表。
+    # 如果表已存在则跳过（CREATE TABLE IF NOT EXISTS）。
+    # 不会创建数据库本身，数据库需要提前手动创建。
     init_db()
+
+    # yield 把控制权交给 FastAPI，应用开始接受请求
     yield
 
+    # ===== 应用关闭时执行 =====
+    # 这里可以添加清理代码，例如:
+    #   - 关闭 Redis 连接
+    #   - 停止后台定时任务
+    #   - 刷新缓冲区数据
+    pass  # MVP 阶段暂无清理需求
+
+
+# ============================================================
+# 二、FastAPI 应用实例
+# ============================================================
+# 整个应用的核心对象。所有路由注册、中间件、依赖注入都绑定在 app 上。
+#
+# 参数说明:
+#   title   → Swagger 文档页面的标题（会显示在顶部）
+#   version → API 版本号（显示在 Swagger 文档中）
+#   debug   → 调试模式，true 时显示详细错误信息和交互式调试页面
+#   lifespan → 生命周期管理函数（上面定义的）
+# ============================================================
 
 app = FastAPI(
     title=APP_NAME,
     version=APP_VERSION,
     debug=APP_DEBUG,
-    openapi_url="/api/v1/openapi.json",
     lifespan=lifespan,
 )
 
 
-# GitHub CRM 模块使用的业务异常。
+# ============================================================
+# 业务异常统一处理器
+# ============================================================
+# 两套异常体系统一处理: BizError(队友) + BusinessError(我的)
 @app.exception_handler(BizError)
-def biz_error_handler(_, exc: BizError):
+def biz_error_handler(request, exc: BizError):
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.code, "message": exc.message, "data": None},
     )
 
 
-def _business_error_response(_, exc):
-    """兼容公共模块与客服 Agent 的统一业务异常响应。"""
+@app.exception_handler(BusinessError)
+def business_error_handler(request, exc: BusinessError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.detail,
+    )
 
-    return JSONResponse(status_code=exc.status_code, content=exc.detail)
 
-
-app.add_exception_handler(CommonBusinessError, _business_error_response)
-if AgentBusinessError is not CommonBusinessError:
-    app.add_exception_handler(AgentBusinessError, _business_error_response)
-
+# ============================================================
+# 三、健康检查接口
+# ============================================================
+# 这是一个很简单的端点，用于:
+#   1. 确认服务是否在运行（运维监控 / 负载均衡器健康探测）
+#   2. 快速验证部署是否成功
+#
+# 使用:
+#   GET http://localhost:8000/health
+#   返回: {"status": "ok", "service": "教育服务系统 API", "version": "1.0.0"}
+#
+# 扩展建议:
+#   可以加上数据库连接检查:
+#     try: db.execute(text("SELECT 1")); db_status="ok"
+#     except: db_status="error"
+# ============================================================
 
 @app.get("/health", tags=["系统"])
 def health_check():
-    """服务健康检查，不访问数据库。"""
+    """
+    服务健康检查端点。返回 200 即表示服务正常运行。
 
-    return {"status": "ok", "service": APP_NAME, "version": APP_VERSION}
+    tags=["系统"] 让这个接口在 Swagger 文档中归入"系统"分组，
+    与其他业务接口（用户管理、CRM等）分开显示。
+    """
+    return {
+        "status": "ok",
+        "service": APP_NAME,
+        "version": APP_VERSION,
+    }
 
 
 # ============================================================
-# 路由注册：GitHub 业务模块 + 本地客服 Agent 模块
+# 四、路由注册
 # ============================================================
+from routers import register_routers
 
-# 基础设施：登录、用户、角色、组织等。
-app.include_router(tools_router, prefix="/api/v1", tags=["基础设施"])
+# 所有业务路由只通过统一入口装配，避免合并后重复注册或漏掉报告 V2。
+register_routers(app)
 
-# 客户研判：资料上传、画像规则、AI 研判。
-app.include_router(profile_router, prefix="/api/v1", tags=["客户研判"])
 
-# 企业助手与员工日报。
-app.include_router(crm_router, prefix="/api/v1/crm", tags=["企业助手"])
-app.include_router(employee_router, prefix="/api/v1/employee", tags=["员工日报"])
-app.include_router(assistant_router, prefix="/api/v1", tags=["智能助手"])
 
-# 学生智能助手与学生对话。
-app.include_router(student_router, prefix="/api/v1/student", tags=["学生智能助手"])
-app.include_router(student_chat_router, prefix="/api/v1")
-
-# 智能报告。
-app.include_router(report_router, prefix="/api/v1/report", tags=["智能报告"])
-
-# 客服 Agent：课程、活动、活动报名、客服会话与消息。
-# chat_router 自身已经声明 prefix="/api/v1"，此处不再叠加前缀。
-app.include_router(chat_router)
-
+# ============================================================
+# 五、启动入口（直接运行 python main.py 时触发）
+# ============================================================
+# 开发时可以直接 python main.py 启动，不需要记 uvicorn 命令行参数。
+# 生产环境建议用 uvicorn 命令行启动（支持多 worker）。
+# ============================================================
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    # --- 启动参数说明 ---
+    # "main:app"        → 模块名:变量名（本文件的 app 变量）
+    # host="0.0.0.0"    → 监听所有网络接口（允许局域网内其他设备访问）
+    #                   如果只想本机访问，改为 host="127.0.0.1"
+    # port=8000          → HTTP 端口号
+    # reload=True        → 代码修改后自动重启（开发神器，生产环境必须关闭）
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+    )

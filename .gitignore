@@ -10,3 +10,6 @@ __pycache__/
 venv/
 
 .idea/
+
+# Codex/Superpowers 隔离开发工作区，禁止误提交嵌套仓库内容。
+.worktrees/

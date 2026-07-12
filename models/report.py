@@ -31,11 +31,17 @@ from sqlalchemy import Date, DateTime, Enum, Index, Integer, JSON, Numeric, Stri
 from sqlalchemy.dialects.mysql import BIGINT, MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
+from models.student import StudentFeedbackTicket as CanonicalStudentFeedbackTicket
+from models.student import StudentPsychAlert as CanonicalStudentPsychAlert
 from utils.database import Base
 
 
 REPORT_STATUS_VALUES = ("pending", "generating", "completed", "failed")
 TRIGGER_SOURCE_VALUES = ("manual", "schedule", "retry", "system")
+
+# 生产 MySQL 需要 MEDIUMTEXT 保存完整 HTML；SQLite 测试环境不认识该方言专有类型，
+# 因此退化为等价的 Text。字段语义和 MySQL 建表类型都不会改变。
+REPORT_HTML_TYPE = MEDIUMTEXT().with_variant(Text(), "sqlite")
 
 
 class ReportGeneration(Base):
@@ -78,7 +84,7 @@ class ReportGeneration(Base):
         comment="按 report_type 区分的结构化报告内容",
     )
     report_html: Mapped[Optional[str]] = mapped_column(
-        MEDIUMTEXT,
+        REPORT_HTML_TYPE,
         default=None,
         comment="后端模板渲染后的 HTML，禁止模型直接输出任意 HTML",
     )
@@ -451,14 +457,14 @@ class ReportAction(Base):
     )
 
 
-class StudentFeedbackTicket(Base):
+class _LegacyStudentFeedbackTicket(Base):
     """投诉/反馈工单最小模型。
 
     原计划要求给投诉工单增加 ``first_response_time`` 和 ``resolved_time``。
     本模型保留最小字段，既能支持 SLA 报告，也能给维护接口做演示。
     """
 
-    __tablename__ = "student_feedback_ticket"
+    __abstract__ = True
 
     id: Mapped[int] = mapped_column(BIGINT(unsigned=True), primary_key=True, autoincrement=True, comment="主键")
     student_id: Mapped[Optional[int]] = mapped_column(BIGINT(unsigned=True), default=None, comment="学生 ID")
@@ -487,13 +493,13 @@ class StudentFeedbackTicket(Base):
     )
 
 
-class StudentPsychAlert(Base):
+class _LegacyStudentPsychAlert(Base):
     """心理预警最小模型。
 
     报告只能统计风险等级、状态和跟进时效，不能把学生原文传入快照或 Dify。
     """
 
-    __tablename__ = "student_psych_alert"
+    __abstract__ = True
 
     id: Mapped[int] = mapped_column(BIGINT(unsigned=True), primary_key=True, autoincrement=True, comment="主键")
     student_id: Mapped[Optional[int]] = mapped_column(BIGINT(unsigned=True), default=None, comment="学生 ID")
@@ -515,3 +521,9 @@ class StudentPsychAlert(Base):
             "comment": "学生心理预警表",
         },
     )
+
+
+# 学生模块是两张学生表的唯一 ORM 所有者。保留报告模块的导入名称，避免已有
+# 报告代码或外部脚本因导入路径变化中断，但不再向 Base.metadata 注册第二份表。
+StudentFeedbackTicket = CanonicalStudentFeedbackTicket
+StudentPsychAlert = CanonicalStudentPsychAlert

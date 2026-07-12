@@ -131,7 +131,7 @@ export default function ReportGeneratePage() {
             </div>
 
             {/* 统计周期 */}
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="period_start">统计开始日期</Label>
                 <Input id="period_start" type="date" {...register('period_start')} />
@@ -146,7 +146,7 @@ export default function ReportGeneratePage() {
             {selectedDef && selectedDef.available_filters.length > 0 && (
               <div className="space-y-2">
                 <Label>筛选条件（可选）</Label>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
                   {selectedDef.available_filters.map((filterKey) => (
                     <Input
                       key={filterKey}

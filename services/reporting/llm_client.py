@@ -103,6 +103,7 @@ class ReportLLMClient:
         temperature: float = 0.2,
         max_tokens: int = 1200,
         top_p: float = 0.9,
+        json_mode: bool = True,
     ) -> LLMResponse:
         """调用 LLM Chat Completions API。
 
@@ -113,6 +114,8 @@ class ReportLLMClient:
             temperature: 温度参数，默认 0.2（低随机性，适合报告类任务）。
             max_tokens: 最大输出 Token，默认 1200。
             top_p: nucleus sampling，默认 0.9。
+            json_mode: 是否要求供应商以 JSON object 模式返回。意图解析、报告生成使用
+                JSON；面向用户的自然语言回答必须关闭，否则部分兼容接口会拒绝请求。
 
         Returns:
             ``LLMResponse``，成功时 ``content`` 为模型文本，失败时 ``error`` 有值。
@@ -129,6 +132,7 @@ class ReportLLMClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
+                    json_mode=json_mode,
                     total_start=total_start,
                     retry_count=retry_count,
                 )
@@ -173,6 +177,7 @@ class ReportLLMClient:
         temperature: float,
         max_tokens: int,
         top_p: float,
+        json_mode: bool,
         total_start: float,
         retry_count: int,
     ) -> LLMResponse:
@@ -192,14 +197,18 @@ class ReportLLMClient:
 
         call_start = time.perf_counter()
 
-        response = self._client.chat.completions.create(
+        request_kwargs = dict(
             model=self._model,
             messages=messages,  # type: ignore[arg-type]
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,
-            response_format={"type": "json_object"},
         )
+        # 只有结构化输出场景才声明 JSON mode。普通回答若也携带该参数，DeepSeek 等
+        # 兼容接口会要求提示词显式包含 json 并返回 400，最终误触发模板降级。
+        if json_mode:
+            request_kwargs["response_format"] = {"type": "json_object"}
+        response = self._client.chat.completions.create(**request_kwargs)
 
         latency_ms = int((time.perf_counter() - total_start) * 1000)
         choice = response.choices[0]

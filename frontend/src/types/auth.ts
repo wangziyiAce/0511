@@ -20,7 +20,7 @@ export interface TokenResponse {
   username: string
   real_name: string
   user_type: string
-  role_code: string
+  role_code?: string
 }
 
 /** GET /api/v1/auth/me 响应体（当前登录用户信息） */
@@ -29,7 +29,7 @@ export interface CurrentUser {
   username: string
   real_name: string
   user_type: string
-  role_code: string
+  role_code?: string
   department: string | null
 }
 

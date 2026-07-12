@@ -9,13 +9,19 @@
 
 /* ---- shadcn/ui CSS 变量（base-nova / neutral）---- */
 :root {
-  --background: #ffffff;
-  --foreground: oklch(0.145 0 0);
-  --card: #ffffff;
+  --paper: #f4efe5;
+  --paper-raised: #fffdf8;
+  --wine: #7f1d2d;
+  --wine-dark: #56121d;
+  --ink: #171717;
+  --bronze: #b1854b;
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--paper-raised);
   --card-foreground: oklch(0.145 0 0);
   --popover: #ffffff;
   --popover-foreground: oklch(0.145 0 0);
-  --primary: #234999;
+  --primary: var(--wine);
   --primary-foreground: #f8fafc;
   --secondary: #f1f5f9;
   --secondary-foreground: #1e293b;
@@ -27,18 +33,18 @@
   --destructive-foreground: #f8fafc;
   --border: #e2e8f0;
   --input: #e2e8f0;
-  --ring: #234999;
-  --radius: 0.5rem;
+  --ring: var(--wine);
+  --radius: 0.25rem;
 
   /* ---- Sidebar ---- */
-  --sidebar-background: #0f2740;
-  --sidebar-foreground: #b0c4de;
-  --sidebar-primary: #4a90d9;
+  --sidebar-background: #171717;
+  --sidebar-foreground: #d8cdbd;
+  --sidebar-primary: var(--wine);
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #1a3470;
+  --sidebar-accent: #2a2522;
   --sidebar-accent-foreground: #d4e0f5;
-  --sidebar-border: #1a3470;
-  --sidebar-ring: #4a90d9;
+  --sidebar-border: #3a322d;
+  --sidebar-ring: var(--bronze);
 
   /* 图表配色 */
   --chart-1: #234999;
@@ -93,6 +99,11 @@
 
 /* ---- 品牌色（独立 Tailwind 类）---- */
 @theme {
+  --color-paper: var(--paper);
+  --color-paper-raised: var(--paper-raised);
+  --color-wine: var(--wine);
+  --color-ink: var(--ink);
+  --color-bronze: var(--bronze);
   --color-brand-950: #0f1d3d;
   --color-brand-900: #13274f;
   --color-brand-800: #1a3470;
@@ -110,7 +121,8 @@
   --color-danger: #ef4444;
   --color-info: #3b82f6;
 
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-sans: 'Noto Sans SC', 'Source Han Sans SC', 'Microsoft YaHei', sans-serif;
+  --font-serif: 'Noto Serif SC', 'Source Han Serif SC', Georgia, serif;
   --font-mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
 }
 
@@ -123,9 +135,39 @@
   body {
     font-family: var(--font-sans);
     color: var(--foreground);
-    background-color: #f8fafc;
+    background-color: var(--paper);
+    background-image: radial-gradient(circle at 20% 10%, rgb(177 133 75 / 7%) 0 1px, transparent 1px);
+    background-size: 18px 18px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     margin: 0;
+    overflow-x: hidden;
+    -webkit-tap-highlight-color: rgb(127 29 45 / 16%);
   }
+  button, a, input, select, textarea { touch-action: manipulation; }
 }
+
+@layer components {
+  .editorial-header { @apply flex flex-col gap-5 border-b border-bronze/50 pb-5 md:flex-row md:items-end md:justify-between; }
+  .editorial-kicker { @apply mb-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-wine; }
+  .editorial-title { @apply font-serif text-3xl font-semibold tracking-tight text-ink md:text-4xl; }
+  .editorial-description { @apply mt-2 max-w-3xl text-sm leading-6 text-muted-foreground; }
+  .archive-card { @apply border border-bronze/40 bg-paper-raised shadow-[0_12px_30px_rgb(52_40_24/7%)]; }
+  .archive-card__header { @apply flex min-h-14 items-center justify-between border-b border-bronze/30 px-5 py-3; }
+  .archive-card__header h2 { @apply inline font-serif text-lg font-semibold text-ink; }
+  .archive-card__body { @apply p-5; }
+  .archive-index { @apply mr-3 font-mono text-[10px] tracking-widest text-wine; }
+  .status-stamp { @apply inline-flex border px-2 py-1 text-[10px] font-semibold uppercase tracking-wider; }
+  .status-stamp--neutral { @apply border-border text-muted-foreground; }
+  .status-stamp--success { @apply border-success/40 bg-success/10 text-emerald-800; }
+  .status-stamp--warning { @apply border-warning/40 bg-warning/10 text-amber-800; }
+  .status-stamp--danger { @apply border-danger/40 bg-danger/10 text-red-800; }
+  .status-stamp--info { @apply border-info/40 bg-info/10 text-blue-800; }
+  .editorial-timeline { @apply space-y-0; }
+  .editorial-timeline li { @apply relative grid grid-cols-[18px_1fr] gap-3 pb-5 before:absolute before:left-[5px] before:top-3 before:h-full before:w-px before:bg-bronze/35 last:pb-0 last:before:hidden; }
+  .editorial-timeline__dot { @apply mt-1.5 h-[11px] w-[11px] rounded-full border-2 border-wine bg-paper-raised; }
+  .page-enter { animation: editorial-enter 200ms ease-out both; }
+}
+
+@keyframes editorial-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }

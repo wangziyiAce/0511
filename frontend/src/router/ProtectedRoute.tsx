@@ -16,6 +16,7 @@ import { Navigate, useLocation } from 'react-router-dom'
 import { useAuthStore } from '@/stores/auth-store'
 import { getMe } from '@/api/auth'
 import LoadingState from '@/components/shared/LoadingState'
+import { normalizeRoleCode } from '@/lib/role-navigation'
 
 export default function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { token, user, logout } = useAuthStore()
@@ -28,7 +29,13 @@ export default function ProtectedRoute({ children }: { children: React.ReactNode
       setLoading(true)
       getMe()
         .then((res) => {
-          useAuthStore.setState({ user: res.data })
+          // 认证 API 已在边界处解包统一响应，路由守卫只接收 CurrentUser。
+          useAuthStore.setState({
+            user: {
+              ...res,
+              role_code: normalizeRoleCode(res.role_code, res.user_type),
+            },
+          })
         })
         .catch(() => {
           logout()

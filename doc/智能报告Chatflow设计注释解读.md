@@ -40,6 +40,8 @@ app:
   mode: advanced-chat
 ```
 
+本机 Docker 部署的联调地址应配置为 `DIFY_API_URL=http://localhost/v1`：这是 Nginx 暴露给宿主机的 API base URL，后端会再拼接 `/chat-messages`。不要把容器内部的 `127.0.0.1:5001` 直接填到宿主机运行的 FastAPI 配置中，否则请求不会进入 Dify API。
+
 这里虽然叫 Chatflow，但不是让用户自由聊天。每次报告生成都是独立的一次后端任务，不传 `conversation_id`，也不读取历史会话。这样可以避免上一份报告的数据污染下一份报告。
 
 ## 3. 后端和 Dify 的责任边界
@@ -62,6 +64,8 @@ Chatflow 不能做以下事情：
 - 不能输出 `metrics`、`risk_items` 或 `action_checklist` 去覆盖后端数据。
 
 后端 `ai_generator.py` 只会从模型结果中合并 `summary` 和 `explanation`。即使模型额外返回 `metrics`，后端也不会采用，因此业务数字仍以聚合器结果为准。
+
+部分推理型模型可能在 `answer` 的 JSON 前附带推理文本。报告后端的 `_parse_dify_chatflow_content` 会提取其中最外层 JSON，再交给 Pydantic 校验；如果找不到合法 JSON 或字段不合法，任务不会保存为成功，而是进入既定的修复/失败链路。
 
 ## 4. 节点与数据流
 

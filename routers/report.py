@@ -208,7 +208,9 @@ def create_report_action(
 ) -> ReportAction:
     """把报告建议转成行动项。
 
-    AI 建议不会自动成为任务，必须由管理者/员工确认后写入 report_action。
+    请求来自报告详情页，``report_id`` 决定行动项归属；当前用户必须能访问该报告。
+    AI 建议不会自动成为任务，必须由管理者/员工确认后才写入 ``report_action``。
+    成功返回带数据库 ID 和状态的行动项；报告不存在返回 404，越权返回 403。
     """
 
     report = db.query(ReportGeneration).filter_by(id=report_id).first()
@@ -230,13 +232,18 @@ def create_report_action(
     db.refresh(action)
     return action
 
-
 @router.get("/{report_id}/actions", response_model=list[ReportActionResponse])
 def list_report_actions(
     report_id: int,
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> list[ReportAction]:
+    """查询指定报告的行动项，供报告详情页展示闭环进度。
+
+    当前用户必须先通过报告行级权限校验；报告不存在返回 404，越权返回 403。
+    本接口只读数据库，不修改行动状态；没有行动项时返回空列表。
+    """
+
     report = db.query(ReportGeneration).filter_by(id=report_id).first()
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
@@ -251,14 +258,25 @@ def update_report_action(
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> ReportAction:
+    """更新已有行动项的状态、负责人或完成数据。
+
+    请求来自报告行动管理界面，只更新前端实际提交的字段。行动项及其关联报告都
+    必须存在，并通过关联报告执行行级鉴权；任一关联缺失时返回 404，避免跳过鉴权
+    后继续写库。成功后提交事务并返回数据库刷新后的行动项。
+    """
+
     action = db.query(ReportAction).filter_by(id=action_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="行动项不存在")
     report = db.query(ReportGeneration).filter_by(id=action.report_id).first()
-    if report:
-        _check_report_row_access(report, current_user)
+    # 行动项的权限继承自报告；关联报告缺失时必须拒绝，不能 fail-open。
+    if not report:
+        raise HTTPException(status_code=404, detail="行动项关联的报告不存在")
+    _check_report_row_access(report, current_user)
+    # 仅取前端实际传入字段，避免部分更新覆盖未提交的数据。
     for field, value in request.model_dump(exclude_unset=True).items():
         setattr(action, field, value)
+    # 将本次状态变化提交到数据库，并读回更新时间等数据库生成字段。
     db.commit()
     db.refresh(action)
     return action

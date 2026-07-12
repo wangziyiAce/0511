@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models.report import ReportGeneration
@@ -78,6 +80,106 @@ def build_idempotency_key(
     return None
 
 
+# ---------------------------------------------------------------------------
+# 原子任务创建结果 — Iteration 1.3
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReportTaskCreationResult:
+    """``create_report_task_result()`` 的返回类型。
+
+    与普通 ``ReportGeneration`` 返回值不同，此类型明确区分"当前请求
+    是否真正完成了新记录的 INSERT"，消除调用方自己 pre-check 的 TOCTOU 竞争。
+
+    Attributes:
+        report: 报告任务记录（新创建或已有）。
+        created: True 表示当前事务真正完成了 INSERT；False 表示命中已有记录。
+    """
+
+    report: ReportGeneration
+    created: bool
+
+
+def create_report_task_result(
+    db: Session,
+    *,
+    report_type: str,
+    title: str,
+    period_start: Optional[date],
+    period_end: Optional[date],
+    generated_by: Optional[int],
+    request_filters: Optional[dict[str, Any]] = None,
+    idempotency_key: Optional[str] = None,
+    trigger_source: str = "manual",
+    schedule_id: Optional[int] = None,
+    retry_of_report_id: Optional[int] = None,
+    retry_count: int = 0,
+) -> ReportTaskCreationResult:
+    """创建报告任务记录，并原子返回是否真正由当前请求创建。
+
+    与 ``create_report_task()`` 功能相同，但返回 ``ReportTaskCreationResult``
+    而非裸 ``ReportGeneration``，使调用方能可靠判断是否需要注册后台任务。
+
+    三条数据库路径：
+    1. 提前命中已有记录 → created=False
+    2. 当前事务 INSERT 成功 → created=True
+    3. 并发 UNIQUE 冲突 → rollback + 查询胜出记录 → created=False
+
+    原 ``create_report_task()`` 保持向后兼容：
+        create_report_task(...) → create_report_task_result(...).report
+    """
+
+    definition = get_report_definition(report_type)
+    start, end = resolve_period(period_start, period_end, period_rule=definition.default_period_rule)
+    final_key = build_idempotency_key(
+        report_type=report_type,
+        period_start=start,
+        period_end=end,
+        schedule_id=schedule_id,
+        request_key=idempotency_key,
+    )
+
+    # ---- 路径 1：提前命中已有幂等键 ----
+    if final_key:
+        existing = db.query(ReportGeneration).filter_by(idempotency_key=final_key).first()
+        if existing:
+            return ReportTaskCreationResult(report=existing, created=False)
+
+    report = ReportGeneration(
+        report_type=report_type,
+        report_title=title,
+        period_start=start,
+        period_end=end,
+        status="pending",
+        schema_version=REPORT_SCHEMA_VERSION,
+        generated_by=generated_by,
+        schedule_id=schedule_id,
+        retry_of_report_id=retry_of_report_id,
+        trigger_source=trigger_source,
+        retry_count=retry_count,
+        idempotency_key=final_key,
+        request_filters=request_filters or {},
+        data_quality=DataQuality().model_dump(),
+    )
+    db.add(report)
+
+    try:
+        db.commit()
+        db.refresh(report)
+        # ---- 路径 2：INSERT 成功 ----
+        return ReportTaskCreationResult(report=report, created=True)
+    except IntegrityError:
+        # ---- 路径 3：并发 UNIQUE 冲突 ----
+        db.rollback()
+        if final_key:
+            winner = db.query(ReportGeneration).filter_by(idempotency_key=final_key).first()
+            if winner:
+                return ReportTaskCreationResult(report=winner, created=False)
+        # 极端情况：无法恢复，重新抛出
+        raise
+
+
 def create_report_task(
     db: Session,
     *,
@@ -97,42 +199,24 @@ def create_report_task(
 
     注意：这里只创建任务，不等待 LLM 调用，也不在请求线程里做重计算。
     FastAPI 接口会返回 202，后台任务再调用 ``generate_report_async``。
+
+    自 Iteration 1.3 起委托给 ``create_report_task_result()``，
+    保持向后兼容的返回类型。
     """
-
-    definition = get_report_definition(report_type)
-    start, end = resolve_period(period_start, period_end, period_rule=definition.default_period_rule)
-    final_key = build_idempotency_key(
+    return create_report_task_result(
+        db,
         report_type=report_type,
-        period_start=start,
-        period_end=end,
-        schedule_id=schedule_id,
-        request_key=idempotency_key,
-    )
-    if final_key:
-        existing = db.query(ReportGeneration).filter_by(idempotency_key=final_key).first()
-        if existing:
-            return existing
-
-    report = ReportGeneration(
-        report_type=report_type,
-        report_title=title,
-        period_start=start,
-        period_end=end,
-        status="pending",
-        schema_version=REPORT_SCHEMA_VERSION,
+        title=title,
+        period_start=period_start,
+        period_end=period_end,
         generated_by=generated_by,
+        request_filters=request_filters,
+        idempotency_key=idempotency_key,
+        trigger_source=trigger_source,
         schedule_id=schedule_id,
         retry_of_report_id=retry_of_report_id,
-        trigger_source=trigger_source,
         retry_count=retry_count,
-        idempotency_key=final_key,
-        request_filters=request_filters or {},
-        data_quality=DataQuality().model_dump(),
-    )
-    db.add(report)
-    db.commit()
-    db.refresh(report)
-    return report
+    ).report
 
 
 def _mark_failed(db: Session, report: ReportGeneration, error_code: str, error: Exception) -> None:
@@ -148,16 +232,44 @@ def generate_report(report_id: int, db: Session) -> ReportGeneration:
 
     后台任务、定时调度器、测试都可以调用它。它接收一个已经创建好的
     ``report_generation`` 记录，然后把状态推进到 completed 或 failed。
+
+    **原子领取（Iteration 1.3）**：使用条件 UPDATE 将 pending 原子切换为
+    generating。如果 updated_rows != 1，说明任务已被其他 worker 领取或状态
+    已不是 pending，直接返回不重复执行。
     """
 
     report = db.query(ReportGeneration).filter_by(id=report_id).first()
     if not report:
         raise ValueError(f"报告不存在: {report_id}")
 
+    # ---- 原子领取：只有 pending 状态的任务才允许进入 generating ----
+    # 条件 UPDATE 防止两个并发 worker 同时读到 pending 后都尝试生成。
+    now = datetime.now()
+    updated_rows = (
+        db.query(ReportGeneration)
+        .filter(
+            ReportGeneration.id == report_id,
+            ReportGeneration.status == "pending",
+        )
+        .update(
+            {
+                ReportGeneration.status: "generating",
+                ReportGeneration.started_time: now,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+
+    if updated_rows != 1:
+        # 任务已被其他 worker 领取，或状态已不是 pending
+        db.refresh(report)
+        return report
+
+    # 刷新以获取 UPDATE 后的状态
+    db.refresh(report)
+
     try:
-        report.status = "generating"
-        report.started_time = datetime.now()
-        db.commit()
 
         definition = get_report_definition(report.report_type)
         period = {

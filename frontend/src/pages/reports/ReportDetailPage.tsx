@@ -10,9 +10,10 @@
  * 6. 展示数据质量和事实与 AI 内容分区
  */
 
+import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, RefreshCw, Loader2, AlertCircle } from 'lucide-react'
+import { ArrowLeft, RefreshCw, Loader2, AlertCircle, Bot } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import PageHeader from '@/components/shared/PageHeader'
@@ -22,6 +23,7 @@ import ErrorState from '@/components/shared/ErrorState'
 import DataQualityBanner from '@/components/shared/DataQualityBanner'
 import ReportRenderer from '@/components/report/ReportRenderer'
 import ReportHeader from '@/components/report/ReportHeader'
+import { ReportAssistantPanel } from '@/components/report-assistant'
 import { getReportDetail, retryReport } from '@/api/reports'
 import { toast } from 'sonner'
 
@@ -30,6 +32,7 @@ export default function ReportDetailPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const reportId = id ? parseInt(id, 10) : null
+  const [assistantOpen, setAssistantOpen] = useState(false)
 
   // 报告详情查询（自动轮询）
   const { data: report, isLoading, isError, refetch } = useQuery({
@@ -91,10 +94,16 @@ export default function ReportDetailPage() {
   return (
     <div>
       <PageHeader title={report.report_title || '报告详情'}>
-        <Button variant="outline" onClick={() => navigate('/reports')}>
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          返回列表
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setAssistantOpen(true)}>
+            <Bot className="mr-2 h-4 w-4" />
+            智能助手
+          </Button>
+          <Button variant="outline" onClick={() => navigate('/reports')}>
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            返回列表
+          </Button>
+        </div>
       </PageHeader>
 
       {/* 报告元信息 */}
@@ -164,6 +173,14 @@ export default function ReportDetailPage() {
           <ReportRenderer report={report} />
         </div>
       )}
+
+      {/* 智能报告助手面板 */}
+      <ReportAssistantPanel
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        initialReportId={reportId}
+        initialReportType={report.report_type}
+      />
     </div>
   )
 }
