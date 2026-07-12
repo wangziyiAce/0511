@@ -1,6 +1,6 @@
 """数据库连接与初始化。
 
-这个文件是 FastAPI 与 MySQL 的公共入口：
+这个文件是 FastAPI 与 MySQL / SQLite 的公共入口：
 
 * ``engine``：数据库连接池；
 * ``SessionLocal``：数据库会话工厂；
@@ -8,11 +8,7 @@
 * ``get_db``：FastAPI 依赖注入，每个请求自动获取/关闭 Session；
 * ``init_db``：应用启动时注册模型、建表、写入最小种子数据。
 
-为什么本轮重写？
-----------------
-旧版本的 ``init_db`` 依赖 ``services.student_service``，而该文件又依赖当前环境
-未安装的 ``python-jose``。报告 V2 需要稳定地注册新表，所以这里把初始化逻辑
-收敛到数据库工具层本身，减少不必要的启动耦合。
+SQLite 支持通过 ``_engine_options()`` 自动检测，用于本地测试与 CI。
 """
 
 from __future__ import annotations
@@ -23,7 +19,7 @@ from typing import Generator
 import bcrypt
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import QueuePool, StaticPool
 
 from config import (
     DATABASE_URL,
@@ -32,27 +28,38 @@ from config import (
     DB_POOL_RECYCLE,
     DB_POOL_SIZE,
     DB_POOL_TIMEOUT,
+    settings,
 )
 
 
 if not DATABASE_URL:
-    raise RuntimeError(
-        "未配置 DATABASE_URL，也未提供完整的 DB_USER、DB_PASSWORD、DB_NAME；"
-        "请在环境变量或 .env 中设置数据库连接。"
-    )
+    raise RuntimeError("DATABASE_URL is not configured for education_service")
 
 
-engine = create_engine(
-    DATABASE_URL,
-    poolclass=QueuePool,
-    pool_size=DB_POOL_SIZE,
-    max_overflow=DB_MAX_OVERFLOW,
-    pool_timeout=DB_POOL_TIMEOUT,
-    pool_recycle=DB_POOL_RECYCLE,
-    pool_pre_ping=True,
-    echo=DB_ECHO,
-)
+def _engine_options() -> dict:
+    """根据数据库类型返回 engine 参数。
 
+    SQLite 需要 ``check_same_thread=False``，内存库使用 ``StaticPool``。
+    MySQL / PostgreSQL 使用 ``QueuePool`` 并启用 ``pool_pre_ping``。
+    """
+    common = {"echo": DB_ECHO}
+    if DATABASE_URL.startswith("sqlite"):
+        common["connect_args"] = {"check_same_thread": False}
+        if ":memory:" in DATABASE_URL:
+            common["poolclass"] = StaticPool
+        return common
+    return {
+        **common,
+        "poolclass": QueuePool,
+        "pool_size": DB_POOL_SIZE,
+        "max_overflow": DB_MAX_OVERFLOW,
+        "pool_timeout": DB_POOL_TIMEOUT,
+        "pool_recycle": DB_POOL_RECYCLE,
+        "pool_pre_ping": True,
+    }
+
+
+engine = create_engine(DATABASE_URL, **_engine_options())
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
@@ -61,20 +68,23 @@ class Base(DeclarativeBase):
 
 
 def get_db() -> Generator[Session, None, None]:
-    """FastAPI 依赖：为每个请求提供一个数据库 Session。"""
+    """FastAPI 依赖：为每个请求提供一个数据库 Session。
 
+    每次请求开始时通过 ``SessionLocal()`` 创建会话，
+    请求结束后在 ``finally`` 中关闭，确保连接归还连接池。
+    """
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
+
 def _hash_seed_password(password: str) -> str:
     """种子用户密码哈希。
 
     这里不从 ``utils.auth`` 导入，避免数据库层和认证层循环依赖。
     """
-
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
@@ -83,7 +93,6 @@ def seed_basic_users(db: Session) -> None:
 
     种子数据只在表为空或用户不存在时写入，重复启动不会重复插入。
     """
-
     from models.user import SysRole, SysUser
 
     if db.query(SysRole).count() == 0:
@@ -122,7 +131,6 @@ def _auto_migrate_missing_columns() -> None:
 
     生产环境应使用 Alembic 等正式迁移工具代替此函数。
     """
-
     from sqlalchemy import inspect, text
 
     inspector = inspect(engine)
@@ -192,27 +200,27 @@ def _auto_migrate_missing_columns() -> None:
 def init_db() -> None:
     """注册全部 ORM 模型并创建表。
 
-    ``create_all`` 只会创建不存在的表，不会自动 ALTER 已有表。生产环境仍建议
-    使用 Alembic 或显式 SQL 迁移；本项目同步提供了 ``db_init.sql``。
+    ``create_all`` 只会创建不存在的表，不会自动 ALTER 已有表。
+    开发环境额外执行自动列补齐和种子数据写入。
     """
-
-    # 只在开发环境自动建表；生产环境应由 DBA 或 Alembic 管理。
-    app_env = os.getenv("APP_ENV", "production").lower()
-    if app_env != "development":
+    if not settings.is_development:
         return
 
-    # 导入所有 Model 模块，触发类定义注册到 Base.metadata。
-    # noqa: F401 — 故意不使用导入的类，只为触发 SQLAlchemy 注册。
-    import models.chat  # noqa: F401
-    import models.crm  # noqa: F401
-    import models.knowledge  # noqa: F401
-    import models.report  # noqa: F401
-    import models.student  # noqa: F401
-    import models.user  # noqa: F401
+    # 导入所有 Model 模块，触发类定义注册到 Base.metadata
+    try:
+        from models import load_all_models
+        load_all_models()
+    except ImportError:
+        # 兼容旧版 models 包（无 load_all_models 时回退为显式导入）
+        import models.chat  # noqa: F401
+        import models.crm  # noqa: F401
+        import models.knowledge  # noqa: F401
+        import models.report  # noqa: F401
+        import models.student  # noqa: F401
+        import models.user  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 
-    # 不在启动期执行 ALTER TABLE，避免连接串指向错误数据库时改变既有结构。
     db = SessionLocal()
     try:
         seed_basic_users(db)
