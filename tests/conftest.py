@@ -58,17 +58,29 @@ def engine():
     )
 
 
-# 测试只依赖以下表，避免 student 模块中跨表重名索引（idx_status 等）
-# 在 SQLite 下建表失败（SQLite 索引名数据库级必须全局唯一，MySQL 表级允许重复）
+# 测试建表白名单：建全部非 student 模块的表。
+# 为什么排除 student 模块：student 模块多张表使用了跨表重名索引
+# （如 idx_status），SQLite 要求索引名在数据库级全局唯一，而 MySQL 只在
+# 表级允许重复。若把 student 表也建进来，SQLite 会在 create_all 阶段因
+# 索引名冲突直接报错，导致整个测试会话建表失败。
+# 排除方式：用表名前缀/精确名单过滤，新增非 student 模块表时无需手动维护。
+STUDENT_TABLES = {
+    "academic_deadline",
+    "application_progress",
+    "student_admin_service",
+    "student_feedback_ticket",
+    "student_info",
+    "student_intent_tag",
+    "student_notification",
+    "student_psych_alert",
+    "student_psych_profile",
+    "student_psych_record",
+    "student_score",
+}
+
 NEEDED_TABLES = [
-    "sys_role",
-    "sys_user",
-    "sys_organization",
-    "crm_lead",
-    "crm_follow_up",
-    "employee_daily_report",
-    "assistant_session",
-    "assistant_message",
+    name for name in Base.metadata.tables.keys()
+    if name not in STUDENT_TABLES
 ]
 
 

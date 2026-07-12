@@ -96,6 +96,50 @@ def _call_llm(system_prompt: str, user_content: str) -> Optional[str]:
         return None
 
 
+def _safe_jsonable(obj: Any) -> Any:
+    """把 API/SQL 执行结果递归转换成可被 json.dumps 序列化的结构。
+
+    API 执行结果可能是 SQLAlchemy ORM 对象、含 datetime/Decimal 的字典或
+    嵌套列表。直接 json.dumps 会因 datetime/Decimal/ORM 实例而抛出
+    TypeError，或在访问未加载的 ORM 关系属性时触发 SQLAlchemy 懒加载查询
+    （脱离会话后抛 StatementError）。这里统一兜底：
+      - 有 model_dump 的 Pydantic/ORM 对象优先用 model_dump(mode='json')，
+        它会把 datetime/Decimal 直接转成字符串，且不会触发数据库查询；
+      - 纯 ORM 实例直接转 str() 兜底，绝不访问其属性（避免触发懒加载查询）；
+      - datetime 转 ISO 字符串，Decimal 转 float；
+      - 其余未知类型一律转 str，保证 _format_api_result 拼接提示词不中断。
+    """
+    # 1. Pydantic 模型 / 支持 model_dump 的对象：mode='json' 安全转字符串
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        try:
+            return obj.model_dump(mode="json")
+        except Exception:
+            pass
+    # 2. 纯 ORM 实例：绝不访问其属性（会触发 SQLAlchemy 懒加载查询，
+    #    脱离会话后抛 StatementError）。只读取元数据里的表名，不碰任何字段，
+    #    返回一个安全的占位字符串，保证 json.dumps 不会中断。
+    if hasattr(obj, "__table__") and hasattr(obj, "__dict__"):
+        try:
+            table_name = obj.__table__.name
+        except Exception:
+            table_name = "orm_object"
+        return f"<{table_name}>"
+    if isinstance(obj, dict):
+        return {k: _safe_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_jsonable(v) for v in obj]
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    # 3. 兜底：未知类型直接转字符串，避免 json.dumps 抛 TypeError
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        return str(obj)
+
+
 def _extract_json(text: str) -> Optional[dict]:
     """
     从 LLM 返回的文本中提取 JSON 对象。
@@ -686,9 +730,8 @@ def _format_api_result(user_message: str, api_id: str, result: Any) -> str:
 调用的 API: {api_id} — {api_config.get('name', '')}
 
 执行结果:
-{json.dumps(result, ensure_ascii=False, indent=2) if result else '无'}
-
-请生成自然语言回复。"""
+{json.dumps(_safe_jsonable(result), ensure_ascii=False, indent=2) if result else '无'}
+"""
 
     return _call_llm(system_prompt, user_content) or "操作完成。"
 
@@ -779,13 +822,18 @@ class AssistantService:
             action_type = "text"
 
         # 5. 保存助手回复
+        # action_data / action_detail 可能含 datetime/Decimal/ORM 等不可直接
+        # 序列化对象（例如 NL2API 返回的 LeadResponse.model_dump() 含时间字段）。
+        # 数据库 action_result 是 JSON 列，commit 时会用 json.dumps 序列化，
+        # 遇到 datetime 会抛 TypeError 导致整条消息写入失败。这里先用
+        # _safe_jsonable 把它们转成纯可序列化结构，再入库。
         assistant_message = AssistantMessage(
             session_id=session.session_id,
             role="assistant",
             content=reply_text,
             action_type=action_type,
-            action_detail=action_detail,
-            action_result=action_data,
+            action_detail=_safe_jsonable(action_detail),
+            action_result=_safe_jsonable(action_data),
         )
         self.db.add(assistant_message)
 

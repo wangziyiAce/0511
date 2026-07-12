@@ -65,11 +65,13 @@ from datetime import date
 import pytest
 
 import services.crm_service as crm_svc
+import services.assistant_service as assistant_svc
 from services.crm_service import (
-    AssistantService,
     CrmService,
     EmployeeService,
 )
+# AssistantService 已独立到 services.assistant_service（避免与 crm_service 形成循环导入）
+from services.assistant_service import AssistantService
 from schemas.crm import DailyReportCreate
 from models.common import get_current_user
 from models.user import SysUser, SysOrganization
@@ -237,7 +239,7 @@ def test_assistant_chat_create_lead_via_nl2api(
         AssistantService, "_recognize_intent",
         lambda self, m: {"intent": "api"},
     )
-    monkeypatch.setattr(crm_svc, "_select_api", lambda m: {
+    monkeypatch.setattr(assistant_svc, "_select_api", lambda m: {
         "api_id": "create_lead",
         "params": {
             "customer_name": "钱七",
@@ -310,7 +312,7 @@ def test_assistant_chat_query_lead_via_nl2sql(
         lambda self, m: {"intent": "sql"},
     )
     monkeypatch.setattr(
-        crm_svc, "_generate_sql",
+        assistant_svc, "_generate_sql",
         lambda m: f"SELECT * FROM crm_lead WHERE id = {lead_id}",
     )
 
@@ -412,7 +414,7 @@ def test_assistant_chat_update_status_via_nl2api(
         AssistantService, "_recognize_intent",
         lambda self, m: {"intent": "api"},
     )
-    monkeypatch.setattr(crm_svc, "_select_api", lambda m: {
+    monkeypatch.setattr(assistant_svc, "_select_api", lambda m: {
         "api_id": "update_lead_status",
         "params": {"id": lead_id, "status": "contacting"},
     })
