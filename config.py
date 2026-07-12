@@ -244,3 +244,113 @@ UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads/profiles")
 # 上传文件大小上限（字节）
 MAX_UPLOAD_SIZE: int = int(os.getenv("MAX_UPLOAD_SIZE", str(10 * 1024 * 1024)))
 
+
+# ============================================================
+# 十、统一 Settings 兼容入口
+# ============================================================
+# 新旧分支合并后，部分模块使用模块级常量，报告 V2 和测试则使用 settings。
+# 两种入口必须指向同一份环境配置，否则测试会绕过 DATABASE_URL，运行时也可能
+# 连接到不同数据库。这里保留模块级常量，同时恢复只读 settings 对象。
+from dataclasses import dataclass as _dataclass
+from urllib.parse import quote_plus as _quote_plus
+
+
+def _config_first_non_empty(*names: str, default: str = "") -> str:
+    """按顺序读取第一个非空环境变量，用于新旧配置名平滑兼容。"""
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return default
+
+
+@_dataclass(frozen=True)
+class Settings:
+    """应用核心配置的只读快照，兼容报告 V2、测试和历史模块。"""
+
+    APP_NAME: str
+    APP_VERSION: str
+    APP_ENV: str
+    APP_DEBUG: bool
+    DATABASE_URL: str
+    DB_ECHO: bool
+    DB_POOL_SIZE: int
+    DB_MAX_OVERFLOW: int
+    DB_POOL_TIMEOUT: int
+    DB_POOL_RECYCLE: int
+    SECRET_KEY: str
+    BCRYPT_COST: int
+    ACCESS_TOKEN_EXPIRE_MINUTES: int
+    DIFY_API_URL: str
+    DIFY_API_KEY: str
+    DIFY_SERVICE_TOKEN: str
+
+    @property
+    def is_development(self) -> bool:
+        """仅 development 环境允许启动期建表和写入开发种子。"""
+        return self.APP_ENV.lower() == "development"
+
+    @classmethod
+    def from_environment(cls) -> "Settings":
+        """从当前进程环境构建配置，DATABASE_URL 优先于历史 DB_* 参数。"""
+        db_host = _config_first_non_empty("DB_HOST", default="localhost")
+        db_port = int(_config_first_non_empty("DB_PORT", default="3306"))
+        db_user = _config_first_non_empty("DB_USER", default="root")
+        db_password = _config_first_non_empty("DB_PASSWORD", default="123456")
+        db_name = _config_first_non_empty("DB_NAME", default="education_service")
+        db_charset = _config_first_non_empty("DB_CHARSET", default="utf8mb4")
+        database_url = _config_first_non_empty("DATABASE_URL")
+        if not database_url:
+            database_url = (
+                f"mysql+pymysql://{_quote_plus(db_user)}:{_quote_plus(db_password)}"
+                f"@{db_host}:{db_port}/{db_name}?charset={db_charset}"
+            )
+
+        jwt_expire_hours = os.getenv("JWT_EXPIRE_HOURS")
+        access_token_minutes_raw = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
+        access_token_minutes = (
+            int(jwt_expire_hours) * 60
+            if jwt_expire_hours
+            else int(access_token_minutes_raw or "1440")
+        )
+
+        return cls(
+            APP_NAME=_config_first_non_empty("APP_NAME", default=APP_NAME),
+            APP_VERSION=_config_first_non_empty("APP_VERSION", default=APP_VERSION),
+            APP_ENV=_config_first_non_empty("APP_ENV", default="production"),
+            APP_DEBUG=_config_first_non_empty("APP_DEBUG", default="false").lower() in {"1", "true", "yes", "on"},
+            DATABASE_URL=database_url,
+            DB_ECHO=_config_first_non_empty("DB_ECHO", default="false").lower() in {"1", "true", "yes", "on"},
+            DB_POOL_SIZE=int(_config_first_non_empty("DB_POOL_SIZE", default="10")),
+            DB_MAX_OVERFLOW=int(_config_first_non_empty("DB_MAX_OVERFLOW", default="20")),
+            DB_POOL_TIMEOUT=int(_config_first_non_empty("DB_POOL_TIMEOUT", default="30")),
+            DB_POOL_RECYCLE=int(_config_first_non_empty("DB_POOL_RECYCLE", default="3600")),
+            SECRET_KEY=_config_first_non_empty("JWT_SECRET_KEY", "SECRET_KEY", default=SECRET_KEY),
+            BCRYPT_COST=int(_config_first_non_empty("BCRYPT_COST", default="12")),
+            ACCESS_TOKEN_EXPIRE_MINUTES=access_token_minutes,
+            DIFY_API_URL=_config_first_non_empty("DIFY_API_BASE_URL", "DIFY_API_URL", default=DIFY_API_URL),
+            DIFY_API_KEY=_config_first_non_empty("DIFY_API_KEY", default=DIFY_API_KEY),
+            DIFY_SERVICE_TOKEN=_config_first_non_empty("DIFY_SERVICE_TOKEN", default=DIFY_SERVICE_TOKEN),
+        )
+
+
+settings = Settings.from_environment()
+
+# 模块级别名与 settings 保持一致，避免两套调用方读取到不同连接或密钥。
+APP_NAME = settings.APP_NAME
+APP_VERSION = settings.APP_VERSION
+APP_ENV = settings.APP_ENV
+APP_DEBUG = settings.APP_DEBUG
+DATABASE_URL = settings.DATABASE_URL
+DB_ECHO = settings.DB_ECHO
+DB_POOL_SIZE = settings.DB_POOL_SIZE
+DB_MAX_OVERFLOW = settings.DB_MAX_OVERFLOW
+DB_POOL_TIMEOUT = settings.DB_POOL_TIMEOUT
+DB_POOL_RECYCLE = settings.DB_POOL_RECYCLE
+SECRET_KEY = settings.SECRET_KEY
+BCRYPT_COST = settings.BCRYPT_COST
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+DIFY_API_URL = settings.DIFY_API_URL
+DIFY_API_KEY = settings.DIFY_API_KEY
+DIFY_SERVICE_TOKEN = settings.DIFY_SERVICE_TOKEN
+

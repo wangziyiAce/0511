@@ -40,7 +40,6 @@ from fastapi.responses import JSONResponse
 
 from config import APP_NAME, APP_VERSION, APP_DEBUG
 from utils.database import init_db
-from routers.crm import crm_router, employee_router
 from services.crm_service import BizError
 from models.common import BusinessError
 
@@ -161,25 +160,10 @@ def health_check():
 # ============================================================
 # 四、路由注册
 # ============================================================
-# 基础设施 + 客户研判（我的模块）
-from routers.tools import router as tools_router
-
-app.include_router(tools_router, prefix="/api/v1", tags=["基础设施"])
-
 from routers import register_routers
 
+# 所有业务路由只通过统一入口装配，避免合并后重复注册或漏掉报告 V2。
 register_routers(app)
-
-# 企业助手 / 学生助手 / 智能报告 / 客服Agent（队友模块）
-from routers.report import router as report_router
-from routers import student
-from routers import student_chat
-
-app.include_router(crm_router,      prefix="/api/v1/crm",      tags=["企业助手"])
-app.include_router(employee_router, prefix="/api/v1/employee", tags=["员工日报"])
-app.include_router(student.router, prefix="/api/v1/student", tags=["学生智能助手"])
-app.include_router(student_chat.router, prefix="/api/v1")
-app.include_router(report_router,    prefix="/api/v1/report",  tags=["智能报告"])
 
 
 

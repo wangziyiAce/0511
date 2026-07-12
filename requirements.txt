@@ -19,6 +19,10 @@
 # 比 Flask 快很多（异步支持），比 Django 轻量（不捆绑 ORM/模板引擎）。
 fastapi>=0.115.0
 
+# python-multipart: FastAPI 解析 multipart/form-data 的依赖。
+# 客户资料上传接口同时接收文件与表单字段；缺少它时，路由在导入阶段就会失败。
+python-multipart>=0.0.9
+
 # Uvicorn: ASGI 服务器，运行 FastAPI 应用的引擎。
 # [standard] 额外安装了 uvloop（高性能事件循环）和 httptools（HTTP 解析器）。
 # 启动命令: uvicorn main:app --reload
@@ -94,3 +98,24 @@ openai>=1.30.0
 # 这个库自动读取并设置到 os.environ。
 # ⚠️ .env 文件绝对不能提交到 Git！
 python-dotenv>=1.0.0
+
+# ========================================
+# 智能报告 V2：定时调度、模板与测试
+# ========================================
+# APScheduler: 独立报告调度进程，支持 cron、coalesce、max_instances。
+apscheduler>=3.10.4
+
+# Jinja2: 后续可替换当前轻量字符串模板，实现更强的 HTML 模板渲染。
+jinja2>=3.1.4
+
+# pytest / pytest-cov / respx: 报告规则、Schema、LLM 调用 Mock 和覆盖率统计。
+pytest>=8.0.0
+pytest-cov>=5.0.0
+respx>=0.21.0
+
+# ========================================
+# 大模型 API 客户端（智能报告模块纯 Python LLM 调用）
+# ========================================
+# OpenAI Python SDK: 兼容 OpenAI / DeepSeek / Qwen Chat Completions API。
+# max_retries=0 关闭 SDK 重试，由 ReportLLMClient 统一控制指数退避。
+openai>=1.50,<2.0

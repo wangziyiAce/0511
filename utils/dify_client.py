@@ -1,4 +1,193 @@
 """
+Dify Workflow API 客户端封装
+===========================================
+封装对 Dify Workflow 的 HTTP 调用，用于:
+  - 客户研判 Workflow
+  - 智能报告生成 Workflow
+  - 其他场景的 Dify Workflow 调用
+
+使用方式:
+  from utils.dify_client import DifyClient
+  client = DifyClient()
+  result = client.run_workflow(report_type="daily_summary", inputs={...})
+
+Dify API 参考:
+  POST /v1/workflows/run  — 执行 Workflow（阻塞模式，等待结果）
+  POST /v1/chat-messages   — 发送对话消息（Chatflow）
+
+设计要点:
+  1. 超时控制: Dify Workflow 默认 120s 超时（报告生成可能较慢）
+  2. 错误处理: 网络异常、Dify 返回非 JSON 时抛出明确错误
+  3. 日志摘要: 记录请求/响应的关键信息，不打印完整内容
+"""
+
+import json
+import logging
+import time
+from typing import Any, Optional
+
+import httpx
+
+from config import DIFY_API_URL, DIFY_API_KEY
+
+logger = logging.getLogger(__name__)
+
+
+# ==================== Dify 客户端 ====================
+
+class DifyClient:
+    """
+    Dify Workflow 阻塞模式客户端。
+
+    使用 Dify 的 /v1/workflows/run 接口，以 blocking 模式调用 Workflow，
+    等待 AI 处理完成后返回结果。
+
+    适用场景:
+      - 客户研判：传入客户资料，返回结构化研判结果
+      - 报告生成：传入业务数据，返回结构化报告内容
+    """
+
+    def __init__(
+        self,
+        api_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout: int = 120,
+    ):
+        """
+        初始化 Dify 客户端。
+
+        Args:
+            api_url: Dify API 基础地址，默认从 config 读取
+            api_key: Dify 应用 API Key，默认从 config 读取
+            timeout: HTTP 请求超时时间（秒），默认 120s
+        """
+        self.api_url = (api_url or DIFY_API_URL).rstrip("/")
+        self.api_key = api_key or DIFY_API_KEY
+        self.timeout = timeout
+
+    def _headers(self) -> dict:
+        """构建请求头"""
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def run_workflow(
+        self,
+        inputs: dict[str, Any],
+        user: str = "system",
+        response_mode: str = "blocking",
+    ) -> dict[str, Any]:
+        """
+        以阻塞模式执行 Dify Workflow。
+
+        Args:
+            inputs: Workflow 输入变量（键值对，对应 Dify 工作流的输入节点）
+            user: 用户标识，默认 "system"
+            response_mode: 响应模式，"blocking"=等待结果, "streaming"=流式
+
+        Returns:
+            Dify Workflow 的完整响应体（包含 outputs 字段）。
+
+        Raises:
+            RuntimeError: Dify 调用失败、返回异常或超时
+        """
+        url = f"{self.api_url}/workflows/run"
+
+        payload = {
+            "inputs": inputs,
+            "response_mode": response_mode,
+            "user": user,
+        }
+
+        start_time = time.time()
+        logger.info(
+            "Dify 请求: url=%s, inputs_keys=%s",
+            url,
+            list(inputs.keys()),
+        )
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(url, json=payload, headers=self._headers())
+
+            elapsed = time.time() - start_time
+            logger.info(
+                "Dify 响应: status=%d, elapsed=%.1fs",
+                response.status_code,
+                elapsed,
+            )
+
+        except httpx.TimeoutException:
+            logger.error("Dify 调用超时: timeout=%ds", self.timeout)
+            raise RuntimeError(f"Dify 调用超时（{self.timeout}秒）")
+        except httpx.ConnectError as e:
+            logger.error("Dify 连接失败: %s", e)
+            raise RuntimeError(f"无法连接到 Dify 服务: {e}")
+        except Exception as e:
+            logger.error("Dify 网络异常: %s", e)
+            raise RuntimeError(f"Dify 网络异常: {e}")
+
+        if response.status_code != 200:
+            logger.error(
+                "Dify 返回非 200: status=%d, body=%s",
+                response.status_code,
+                response.text[:500],
+            )
+            raise RuntimeError(
+                f"Dify 返回错误状态 {response.status_code}: {response.text[:200]}"
+            )
+
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            logger.error("Dify 响应非 JSON: %s", response.text[:500])
+            raise RuntimeError("Dify 响应不是有效的 JSON 格式")
+
+        # 检查 Dify 层面的错误
+        if "error" in result:
+            error_msg = result.get("error", "未知错误")
+            logger.error("Dify 业务错误: %s", error_msg)
+            raise RuntimeError(f"Dify 业务错误: {error_msg}")
+
+        # 检查 Workflow 执行状态
+        workflow_run_id = result.get("workflow_run_id", "unknown")
+        logger.info(
+            "Dify Workflow 完成: run_id=%s, outputs_keys=%s",
+            workflow_run_id,
+            list(result.get("data", {}).get("outputs", {}).keys()),
+        )
+
+        return result
+
+
+# ==================== 便捷函数 ====================
+
+def call_dify_workflow(
+    inputs: dict[str, Any],
+    api_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """
+    快捷调用 Dify Workflow（不需要创建 DifyClient 实例）。
+
+    使用场景:
+      - 异步任务中调用（report_service.py）
+      - 客户研判任务中调用（profile_service.py）
+
+    Args:
+        inputs: Workflow 输入变量
+        api_url: Dify API 地址，默认从 config 读取
+        api_key: Dify API Key，默认从 config 读取
+        timeout: 超时时间（秒）
+
+    Returns:
+        Dify Workflow 响应体
+    """
+    client = DifyClient(api_url=api_url, api_key=api_key, timeout=timeout)
+    return client.run_workflow(inputs=inputs)
+"""
 教育服务系统 — Dify AI 平台调用客户端
 ===========================================
 封装对 Dify Workflow API 的 HTTP 调用。

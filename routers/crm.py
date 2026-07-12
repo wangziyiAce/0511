@@ -37,8 +37,10 @@ from schemas.crm import (
     AssistantMessageResponse, AssistantSessionResponse,
 )
 from services.crm_service import (
-    CrmService, EmployeeService, AssistantService, NotFoundError,
+    CrmService, EmployeeService, NotFoundError,
 )
+# AssistantService 已独立到 services.assistant_service（避免与 crm_service 形成循环导入）
+from services.assistant_service import AssistantService
 from models.common import get_current_user
 from models.user import SysUser
 from utils.database import get_db

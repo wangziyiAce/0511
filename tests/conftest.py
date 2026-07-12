@@ -11,10 +11,32 @@ os.environ["APP_DEBUG"] = "false"
 
 # 必须在导入 config 前设置 DATABASE_URL
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+# 测试默认必须走确定性路径，不能因开发机 .env 中配置了真实密钥而访问外部模型。
+# 需要验证 LLM 的用例会在自身 fixture 中显式开启并注入 Mock。
+os.environ["REPORT_ASSISTANT_LLM_ENABLED"] = "false"
 
 import config as settings  # config 模块以属性方式导出所有配置项（无 settings 对象）
 from utils.database import Base, get_db
 from main import app
+
+
+def _normalize_sqlite_index_names() -> None:
+    """把 MySQL 可接受的同名索引改为 SQLite 元数据内的全局唯一名称。
+
+    生产库允许不同表使用相同索引名；SQLite 要求整个数据库唯一。这里只修改测试进程
+    中的 SQLAlchemy 元数据，不修改业务模型和生产迁移，避免全量建表 fixture 互相污染。
+    """
+    indexes = [index for table in Base.metadata.tables.values() for index in table.indexes]
+    name_counts: dict[str, int] = {}
+    for index in indexes:
+        if index.name:
+            name_counts[index.name] = name_counts.get(index.name, 0) + 1
+    for index in indexes:
+        if index.name and name_counts[index.name] > 1:
+            index.name = f"ix_{index.table.name}_{index.name}"
+
+
+_normalize_sqlite_index_names()
 
 # ---------------------------------------------------------------------------
 # Engine & Session

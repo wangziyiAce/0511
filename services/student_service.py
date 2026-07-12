@@ -307,6 +307,12 @@ class StudentService:
         if data.solution is not None:
             ticket.solution = data.solution
 
+        # 自动补齐 SLA 时间字段，保证 service_sla 和 complaint_weekly 报告可计算。
+        if data.status in {"processing", "resolved", "closed"} and ticket.first_response_time is None:
+            ticket.first_response_time = datetime.now()
+        if data.status in {"resolved", "closed"} and ticket.resolved_time is None:
+            ticket.resolved_time = datetime.now()
+
         # 工单处理完成（已解决/已关闭）后通知学生
         if data.status in ("resolved", "closed"):
             self._push_notification(

@@ -1,20 +1,10 @@
-"""统一业务异常类 - 对齐 API V1.2 错误码体系"""
-from fastapi import HTTPException
+"""统一业务异常类 — 复用 models.common 中的权威定义，避免重复类导致异常处理器漏捕获。
 
+所有模块应只通过 models.common.BusinessError 抛出业务异常，
+main.py 的 business_error_handler 才能统一拦截并返回 {code, message, data}。
+"""
 
-class BusinessError(HTTPException):
-    """统一业务异常"""
-    def __init__(self, code: int, message: str, status_code: int = 400):
-        super().__init__(
-            status_code=status_code,
-            detail={"code": code, "message": message, "data": None},
-        )
-
-
-class NotFoundError(BusinessError):
-    """资源不存在 (404)"""
-    def __init__(self, message: str = "资源不存在"):
-        super().__init__(code=40401, message=message, status_code=404)
+from models.common import BusinessError, NotFoundError, ConflictError  # noqa: F401
 
 
 class ReferenceNotFoundError(BusinessError):
@@ -25,12 +15,6 @@ class ReferenceNotFoundError(BusinessError):
             message=f"{entity}不存在: id={id_value}",
             status_code=404,
         )
-
-
-class ConflictError(BusinessError):
-    """业务冲突 (409)"""
-    def __init__(self, message: str):
-        super().__init__(code=40901, message=message, status_code=409)
 
 
 class StateError(BusinessError):

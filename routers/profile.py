@@ -1,3 +1,12 @@
+"""客户画像研判路由"""
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/")
+async def profile_root():
+    return {"module": "客户画像研判", "status": "ok"}
 """
 客户研判模块 — API 路由
 ===========================================
