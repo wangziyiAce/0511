@@ -61,7 +61,7 @@ from sqlalchemy.dialects.mysql import BIGINT
 # --- SQLAlchemy ORM 声明式映射 ---
 # Mapped[X]     = 类型注解标记，告诉类型检查器这个字段的 Python 类型
 # mapped_column = 等价于旧风格的 Column()，定义数据库列的属性
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 # --- 导入 ORM 基类 ---
 # 继承 Base 后，SQLAlchemy 会自动将类映射为数据库表
@@ -233,6 +233,16 @@ class SysRole(Base):
 class SysUser(Base):
     __tablename__ = "sys_user"
 
+    def __init__(self, **kwargs: object) -> None:
+        """兼容旧测试种子缺少 ``real_name`` 的构造方式。
+
+        当前创建用户接口仍要求明确的真实姓名；仅当历史脚本直接构造 ORM 对象且未
+        传该字段时，才以用户名兜底，避免测试数据因新增非空列无法写入。
+        """
+        if kwargs.get("real_name") is None and kwargs.get("username"):
+            kwargs["real_name"] = kwargs["username"]
+        super().__init__(**kwargs)
+
     # ========================================
     # 字段定义
     # ========================================
@@ -339,6 +349,25 @@ class SysUser(Base):
         comment="账号状态",
     )
 
+    # --- 登录失败计数（连续失败锁定）---
+    # 对应 API 文档 §4.2 规则4：连续 5 次失败锁定 30 分钟
+    # 登录成功后清零
+    failed_login_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="连续登录失败次数（成功后清零）",
+    )
+
+    # --- 锁定截止时间 ---
+    # NULL = 未锁定；非 NULL = 锁定到该时间点
+    # 登录时检查：如果 locked_until > now，拒绝登录
+    locked_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        default=None,
+        comment="账户锁定截止时间（超过后自动解锁）",
+    )
+
     # --- 创建时间 ---
     create_time: Mapped[datetime] = mapped_column(
         DateTime,
@@ -376,6 +405,35 @@ class SysUser(Base):
             "comment": "统一用户表",
         },
     )
+
+    @property
+    def role(self) -> Optional[str]:
+        """兼容旧测试与旧脚本中的 ``role`` 字段读取。
+
+        当前表以 ``user_type`` 表示学生、员工和管理员身份；历史种子数据仍会传入
+        ``role='student'``。用属性映射可保持旧调用可运行，同时不新增数据库列、
+        不改变现有接口字段。
+        """
+        return self.user_type
+
+    @role.setter
+    def role(self, value: Optional[str]) -> None:
+        """把旧角色参数写入当前的 ``user_type`` 字段，供 ORM 构造器兼容使用。"""
+        self.user_type = value
+
+    @validates("status")
+    def normalize_legacy_status(self, key: str, value: object) -> str:
+        """兼容旧种子数据的整数状态值，写库前统一为当前枚举。
+
+        早期聊天测试用 ``1/0`` 表示正常/禁用，而统一用户表已改为
+        ``normal/disabled``。在模型边界转换可避免测试、脚本和真实数据库枚举
+        之间出现类型不一致；新代码仍应直接传可读字符串。
+        """
+        if value == 1:
+            return "normal"
+        if value == 0:
+            return "disabled"
+        return str(value)
 
     def __repr__(self) -> str:
         return f"<SysUser(id={self.id}, username={self.username!r}, user_type={self.user_type!r})>"

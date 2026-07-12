@@ -81,6 +81,12 @@ INTENT_META = {
         "execute": "_exec_notifications",
         "confirm_fmt": None,
     },
+    "upselling": {
+        "name": "增值转化",
+        "slots": [],
+        "execute": "_exec_upselling",
+        "confirm_fmt": None,
+    },
     "psych_express": {
         "name": "心情表达",
         "slots": [],
@@ -182,7 +188,7 @@ def student_chat(
         return _ok(reply)
 
     # ---- 申请/DDL/通知/成绩：直接执行，模板格式化回复（不用 LLM，防幻觉） ----
-    if intent_name in ("application_progress", "deadline_query", "notification_query", "score_query"):
+    if intent_name in ("application_progress", "deadline_query", "notification_query", "score_query", "upselling"):
         result = _exec_immediate(svc, intent_name, student_id, slots_from_llm)
         reply = _format_result(intent_name, result)
         s.add_history("assistant", reply)
@@ -317,6 +323,20 @@ def _exec_immediate(svc: StudentService, intent: str, student_id: int, slots: di
                 for s in items[:10]
             ],
         }
+    if intent == "upselling":
+        from schemas.student import IntentCreate
+        body = IntentCreate(
+            student_id=student_id,
+            intent_type="other",
+            intent_name=slots.get("course_interest", "") or "学生表达升学意向",
+            source="chat", remark="",
+        )
+        try:
+            svc.create_intent(body)
+        except Exception:
+            pass  # 意向记录失败不阻塞对话
+        recs = svc.get_recommendations(student_id)
+        return {"success": True, "recommendations": recs.get("items", []) if isinstance(recs, dict) else []}
     if intent == "notification_query":
         result = svc.list_notifications(student_id)
         items = result.get("items", [])
@@ -347,6 +367,14 @@ _KEYWORDS = {
                      "我的成绩", "查成绩", "查下成绩", "成绩单", "各科成绩",
                      "成绩怎么样", "成绩是多少", "考得怎么样", "分数多少", "排名"],
     "notification_query": ["通知", "消息", "提醒", "小红点"],
+    "upselling": [
+        "读博", "读硕", "读研", "博士", "硕士", "研究生",
+        "升学", "提升学历", "继续读", "继续学", "深造", "进修",
+        "硕博连读", "博士申请", "硕士申请", "申博", "申硕",
+        "想读", "想考", "想申请", "想继续读",
+        "学历提升", "背景提升", "PhD", "Master",
+        "再读一个", "还想读", "有没有博士项目",
+    ],
     "psych_express": ["压力", "焦虑", "难过", "失眠", "想家", "累", "崩溃", "心情"],
 }
 _SLOT_HINTS = {
@@ -393,6 +421,20 @@ def _format_result(intent: str, result: dict) -> str:
         for s in items:
             sc = f"{s.get('score', '-')}分" if s.get('score') is not None else "-"
             lines.append(f"  · {s.get('course','')}  {sc}  ({s.get('semester','')})")
+        return "\n".join(lines)
+
+    if intent == "upselling":
+        recs = result.get("recommendations", [])
+        if not recs:
+            return "已经记录你的升学意向 📝\n目前暂无匹配的推荐项目，我们会尽快为你匹配~"
+        lines = ["根据你的意向，推荐以下项目 🎓\n"]
+        for r in recs[:3]:
+            name = r.get("project_name", r.get("name", ""))
+            desc = r.get("description", r.get("desc", ""))
+            lines.append(f"  · {name}")
+            if desc:
+                lines.append(f"    {desc[:60]}")
+        lines.append("\n需要详细了解可以预约顾问老师~")
         return "\n".join(lines)
 
     if intent == "application_progress":

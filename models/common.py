@@ -53,35 +53,12 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # --- SQLAlchemy ---
-from sqlalchemy import BigInteger, Column, DateTime, func
+from sqlalchemy import BigInteger, Column, DateTime, Integer, func
 from sqlalchemy.orm import Session, declared_attr
 
 # --- 项目内部 ---
 from config import SECRET_KEY, BCRYPT_COST, ACCESS_TOKEN_EXPIRE_MINUTES
 from utils.database import Base, get_db
-
-from sqlalchemy import BigInteger, Column, DateTime
-
-
-# ============================================================
-# 共享 ORM 基类（供客服 Agent / 企业助手等模块共用）
-# ============================================================
-
-# 统一 BIGINT 类型别名（供其他模块 Column(BigIntPrimaryKey, ...) 使用）
-BigIntPrimaryKey = BigInteger
-
-
-class TimestampMixin:
-    """创建时间 Mixin"""
-    create_time = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
-
-
-class UpdateMixin(TimestampMixin):
-    """创建+更新时间 Mixin"""
-    update_time = Column(
-        DateTime, default=datetime.now, onupdate=datetime.now,
-        nullable=False, comment="更新时间",
-    )
 
 # 日志实例
 logger = logging.getLogger(__name__)
@@ -96,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 # BIGINT UNSIGNED AUTO_INCREMENT 主键的快捷定义
 # 用法: id = Column(BigIntPrimaryKey, primary_key=True, autoincrement=True)
-BigIntPrimaryKey = BigInteger().with_variant(
+BigIntPrimaryKey = BigInteger().with_variant(Integer(), "sqlite").with_variant(
     __import__("sqlalchemy.dialects.mysql", fromlist=["BIGINT"]).BIGINT(unsigned=True),
     "mysql",
 )
@@ -112,6 +89,12 @@ class TimestampMixin:
     @declared_attr
     def update_time(cls):
         return Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now(), comment="更新时间")
+
+
+class UpdateMixin(TimestampMixin):
+    """Compatibility alias for models that need both timestamp columns."""
+
+    pass
 
 
 # ============================================================
