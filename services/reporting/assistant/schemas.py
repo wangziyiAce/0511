@@ -42,6 +42,7 @@ class ReportAssistantIntent(str, Enum):
     EXPLAIN_METRIC = "explain_metric"
     QUERY_DATA_QUALITY = "query_data_quality"
     COMPARE_REPORTS = "compare_reports"
+    CROSS_REPORT_ANALYSIS = "cross_report_analysis"
     SUMMARIZE_FOR_ROLE = "summarize_for_role"
     GENERATE_ACTION_CANDIDATES = "generate_action_candidates"
     CONFIRM_ACTIONS = "confirm_actions"

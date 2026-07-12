@@ -207,6 +207,23 @@ class ReportIntentParser:
                 assumptions=["关键词匹配到多轮追问意图"],
             )
 
+        # ---- 再检查比较/跨报告意图（不依赖上下文） ----
+        import re as _re
+        comp_score = sum(1 for kw in _COMPARISON_KEYWORDS if _re.search(kw, message_lower))
+        cross_score = sum(1 for kw in _CROSS_REPORT_KEYWORDS if _re.search(kw, message_lower))
+        if cross_score > comp_score and cross_score > 0:
+            return ReportRequestPlan(
+                intent=ReportAssistantIntent.CROSS_REPORT_ANALYSIS,
+                confidence=0.7,
+                assumptions=["关键词匹配到跨报告分析意图"],
+            )
+        if comp_score > 0:
+            return ReportRequestPlan(
+                intent=ReportAssistantIntent.COMPARE_REPORTS,
+                confidence=0.7,
+                assumptions=["关键词匹配到周期比较意图"],
+            )
+
         # ---- 再用报告类型关键词 ----
         scored: list[tuple[str, int]] = []
 
@@ -330,6 +347,19 @@ _MULTI_TURN_INTENT_KEYWORDS: dict[str, list[str]] = {
     "explain_metric": ["怎么算", "怎么计算", "计算规则", "公式", "怎么来的"],
     "query_data_quality": ["数据可靠", "数据质量", "数据可信", "数据准确"],
 }
+
+# 首轮比较/跨报告意图关键词：不需要已有报告上下文即可触发。
+# 注意：只使用明确的比较短语，避免把包含"上周""哪个渠道"等一般时间/选型
+# 表述的正常生成报告请求误判为比较意图。
+_COMPARISON_KEYWORDS: list[str] = [
+    "对比", "相比", "比较.*和", "和.*比较",
+    "变好还是变差", "变好.*变差", "哪个.*表现得",
+    "这周.*上周", "本周.*上周", "这个月.*上个月",
+]
+_CROSS_REPORT_KEYWORDS: list[str] = [
+    "一起分析", "有没有关联", "是不是因为", "有没有关系",
+    "关联分析", "一起看", "同时看", "和.*一起",
+]
 
 
 def _detect_multi_turn_intent_keywords(

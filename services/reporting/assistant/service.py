@@ -507,6 +507,88 @@ class ReportAssistantService:
                 report_id=report_id, current_user=current_user, db=db,
             )]
 
+        # ---- COMPARE_REPORTS：同类报告周期比较（Iteration 3） ----
+        if plan.intent == ReportAssistantIntent.COMPARE_REPORTS and plan.report_type:
+            from services.reporting.assistant.metric_catalog import list_metrics
+            from services.reporting.assistant.tools import tool_compare_report_metrics
+            from services.reporting.assistant.comparison_period import (
+                resolve_comparison_period,
+            )
+
+            # 解析比较周期
+            comparison_period = resolve_comparison_period(
+                message, now=datetime.now(),
+            )
+            # 获取该报告类型的所有可用指标
+            metrics = list_metrics(plan.report_type)
+            metric_names = [m.metric_name for m in metrics]
+
+            return [tool_compare_report_metrics(
+                report_type=plan.report_type,
+                comparison_period=comparison_period,
+                metric_names=metric_names,
+                current_user=current_user,
+                db=db,
+            )]
+
+        # ---- CROSS_REPORT_ANALYSIS：受控跨报告分析（Iteration 3） ----
+        if plan.intent == ReportAssistantIntent.CROSS_REPORT_ANALYSIS:
+            from services.reporting.assistant.cross_report_catalog import (
+                validate_cross_report_request,
+            )
+            from services.reporting.assistant.tools import tool_compare_report_metrics
+            from services.reporting.assistant.comparison_period import (
+                resolve_comparison_period,
+            )
+
+            # 从消息中检测两个报告类型
+            detected_types = _detect_report_types_from_message(
+                message, allowed_report_types=allowed_types,
+            )
+            if len(detected_types) < 2:
+                return [AssistantToolResult(
+                    tool_name="cross_report_analysis", status="error",
+                    error="请指定两份要组合分析的报告，例如投诉处理和SLA一起分析",
+                )]
+
+            left_type, right_type = detected_types[0], detected_types[1]
+
+            # 构建工具闭包和权限预检
+            period = resolve_comparison_period(message, now=datetime.now())
+
+            def _make_tool(report_type: str):
+                metrics = list_metrics(report_type)
+                metric_names = [m.metric_name for m in metrics]
+
+                def _call():
+                    result = tool_compare_report_metrics(
+                        report_type=report_type,
+                        comparison_period=period,
+                        metric_names=metric_names,
+                        current_user=current_user,
+                        db=db,
+                    )
+                    return result
+                return _call
+
+            try:
+                # validate_cross_report_request 校验权限后执行工具并返回结果
+                executed_results = validate_cross_report_request(
+                    left_type, right_type,
+                    role_code=current_user.role_code or "employee",
+                    permission_check=lambda rt: rt in allowed_types,
+                    tool_calls=(_make_tool(left_type), _make_tool(right_type)),
+                )
+                # 将工具执行结果转换为 AssistantToolResult 列表
+                return list(executed_results)
+            except (ValueError, PermissionError) as exc:
+                err_status = "permission_denied" if isinstance(exc, PermissionError) else "error"
+                return [AssistantToolResult(
+                    tool_name="cross_report_analysis",
+                    status=err_status,
+                    error=str(exc),
+                )]
+
         # ---- 默认：查询已有报告 ----
         if report_id:
             return [tool_query_report_status(report_id=report_id, current_user=current_user, db=db)]
@@ -633,3 +715,38 @@ class ReportAssistantService:
             data_quality=data_quality,
             error_code=error_code,
         )
+
+
+# ── 跨报告类型检测辅助（Iteration 3 — Task 8） ──
+def _detect_report_types_from_message(
+    message: str,
+    allowed_report_types: set[str],
+) -> list[str]:
+    """从用户消息中检测提及的报告类型，按在 allowed_report_types 中出现顺序返回。
+
+    用于跨报告分析时从自然语言中提取两个报告类型标识。
+    LLM 不允许指定未注册的组合类型，解析结果仍由 cross_report_catalog 校验。
+    """
+    import re
+    message_lower = message.lower()
+
+    # 报告类型关键词映射（与 prompts.py 保持一致）
+    _REPORT_KEYWORDS: dict[str, list[str]] = {
+        "complaint_weekly": ["投诉", "处理", "纠纷"],
+        "service_sla": ["sla", "服务水平", "响应", "服务"],
+        "sales_funnel": ["销售漏斗", "转化", "签约", "漏斗"],
+        "customer_ops": ["客户经营", "客户", "运营", "流失"],
+        "application_risk": ["申请风险", "风险", "申请"],
+        "action_closure": ["行动闭环", "闭环", "行动", "完成率"],
+        "channel_roi": ["渠道", "roi", "投入", "回报"],
+    }
+
+    scored: list[tuple[str, int]] = []
+    for report_type in allowed_report_types:
+        keywords = _REPORT_KEYWORDS.get(report_type, [report_type])
+        score = sum(1 for kw in keywords if kw.lower() in message_lower)
+        if score > 0:
+            scored.append((report_type, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [rt for rt, _ in scored]

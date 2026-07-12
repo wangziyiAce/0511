@@ -41,6 +41,7 @@ class TestReportAssistantIntent:
             "generate_report",
             "query_report",
             "compare_reports",
+            "cross_report_analysis",
             "explain_metric",
             "explain_risk",
             "drill_down",
