@@ -12,6 +12,7 @@ from services.reporting.assistant.schemas import (
     ReportAssistantMessageResponse,
     ReportConversationContext,
 )
+from services.reporting.assistant.service import _extract_comparison_response_fields
 
 
 def test_metric_comparison_preserves_none_and_dimension():
@@ -54,3 +55,43 @@ def test_response_accepts_all_comparison_sections():
     assert response.comparison_period == period
     assert response.comparison_data_quality.allow_trend is False
     assert response.relationship_sections.cannot_confirm
+
+
+def test_service_extracts_iteration3_fields_from_comparison_tool_data():
+    """比较工具的确定性结果必须进入公开响应，不能只停留在回答文本内部。"""
+
+    primary_data = {
+        "periods": {
+            "current_start": "2026-06-29",
+            "current_end": "2026-07-05",
+            "previous_start": "2026-06-22",
+            "previous_end": "2026-06-28",
+            "current_label": "本周",
+            "previous_label": "上周",
+            "assumptions": [],
+        },
+        "comparison": [
+            {
+                "report_type": "application_risk",
+                "metric_name": "high_risk_count",
+                "label": "高风险申请数",
+                "dimension": {},
+                "current_value": "2",
+                "previous_value": "1",
+                "delta": "1",
+                "change_rate": "1",
+                "direction": "up",
+                "unit": "个",
+                "current_evidence_id": "E1",
+                "previous_evidence_id": "E2",
+            }
+        ],
+        "current_data_quality": {"level": "ok", "warnings": []},
+        "previous_data_quality": {"level": "ok", "warnings": []},
+    }
+
+    fields = _extract_comparison_response_fields(primary_data)
+
+    assert fields["comparison_period"].current_label == "本周"
+    assert fields["metric_comparisons"][0].metric_name == "high_risk_count"
+    assert fields["comparison_data_quality"].allow_trend is True

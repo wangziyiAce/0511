@@ -17,11 +17,16 @@ from unittest.mock import patch
 import pytest
 
 from services.reporting.assistant.config import ReportAssistantSettings
-from services.reporting.assistant.intent_parser import ReportIntentParser
+from services.reporting.assistant.intent_parser import (
+    ReportIntentParser,
+    _build_intent_system_prompt,
+    _build_intent_user_prompt,
+)
 from services.reporting.assistant.prompts import build_report_catalog, get_allowed_report_types
 from services.reporting.assistant.schemas import (
     ReportAssistantIntent,
     ReportConversationContext,
+    ReportRequestPlan,
 )
 
 
@@ -41,6 +46,31 @@ def _catalog(role_code: str = "admin") -> list:
 
 def _allowed_types(role_code: str = "admin") -> set[str]:
     return get_allowed_report_types(role_code)
+
+
+class TestLLMIntentPromptContract:
+    """验证真实 LLM 能看到当前 Schema 支持的完整意图和判断规则。"""
+
+    def test_user_prompt_lists_every_supported_intent(self):
+        """所有枚举值必须进入 Prompt，否则模型会把 Iteration 3 请求判为 unknown。"""
+
+        prompt = _build_intent_user_prompt("对比本周和上周的申请风险")
+
+        for intent in ReportAssistantIntent:
+            assert intent.value in prompt
+        assert "comparison_relative_period" in prompt
+
+    def test_system_prompt_explains_generate_compare_and_cross_report_requests(self):
+        """冻结首轮生成、周期比较和跨报告分析三类高频入口的判断规则。"""
+
+        prompt = _build_intent_system_prompt(
+            ["application_risk", "weekly_summary"],
+            "- application_risk（申请风险报告）\n- weekly_summary（综合周报）",
+        )
+
+        assert "查看某类报告" in prompt
+        assert "compare_reports" in prompt
+        assert "cross_report_analysis" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +272,34 @@ class TestReportCatalog:
 
 
 class TestParseIntegration:
+    def test_parse_fills_compare_report_type_from_allowed_keywords(self, monkeypatch):
+        """LLM 只识别比较意图时，Python 从白名单关键词补齐报告类型。"""
+
+        import services.reporting.assistant.intent_parser as ip_module
+
+        monkeypatch.setattr(
+            ip_module,
+            "settings",
+            ReportAssistantSettings(enabled=True, llm_enabled=True),
+        )
+        parser = ReportIntentParser()
+        monkeypatch.setattr(
+            parser,
+            "_parse_with_llm",
+            lambda *_args, **_kwargs: ReportRequestPlan(
+                intent=ReportAssistantIntent.COMPARE_REPORTS,
+                confidence=0.9,
+            ),
+        )
+
+        plan = parser.parse(
+            message="对比本周和上周的申请风险",
+            allowed_report_types=_catalog(),
+            context=_ctx(),
+        )
+
+        assert plan.report_type == "application_risk"
+
     def test_parse_falls_back_to_keywords_when_llm_disabled(self, monkeypatch):
         """REPORT_ASSISTANT_LLM_ENABLED=false → 关键词降级。"""
         import services.reporting.assistant.intent_parser as ip_module

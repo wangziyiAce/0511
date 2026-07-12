@@ -41,7 +41,10 @@ from services.reporting.assistant.prompts import (
 )
 from services.reporting.assistant.schemas import (
     AssistantToolResult,
+    ComparisonDataQuality,
+    ComparisonPeriod,
     EvidenceItem,
+    MetricComparison,
     ReportAssistantIntent,
     ReportAssistantMessageRequest,
     ReportAssistantMessageResponse,
@@ -61,6 +64,45 @@ from services.reporting.orchestrator import generate_report_async
 from services.reporting.registry import get_report_definition
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_comparison_response_fields(primary_data: object) -> dict[str, object]:
+    """把只读比较工具结果转换成公开 API 的 Iteration 3 字段。
+
+    Args:
+        primary_data: ``tool_compare_report_metrics`` 返回的 data 字典。
+
+    Returns:
+        可直接传给 ``_build_response`` 的周期、指标和双周期质量字段；非比较工具
+        或字段缺失时返回空字典，保证 Iteration 2 响应不受影响。
+    """
+
+    if not isinstance(primary_data, dict) or "comparison" not in primary_data:
+        return {}
+
+    from services.reporting.assistant.comparison import evaluate_comparison_quality
+
+    current_quality = primary_data.get("current_data_quality") or {}
+    previous_quality = primary_data.get("previous_data_quality") or {}
+    quality_gate = evaluate_comparison_quality(
+        current_quality,
+        previous_quality,
+        compatible=True,
+    )
+    return {
+        "comparison_period": ComparisonPeriod.model_validate(primary_data.get("periods") or {}),
+        "metric_comparisons": [
+            MetricComparison.model_validate(item)
+            for item in primary_data.get("comparison") or []
+        ],
+        "comparison_data_quality": ComparisonDataQuality(
+            current=dict(current_quality),
+            previous=dict(previous_quality),
+            allow_values=quality_gate.allow_values,
+            allow_trend=quality_gate.allow_trend,
+            warnings=list(quality_gate.warnings),
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +366,9 @@ class ReportAssistantService:
             llm_enabled=asst_settings.llm_enabled,
         )
         answer = composed["answer"]
+        # 比较工具已经由 Python 完成周期、指标和质量门禁计算。这里把结构化结果
+        # 显式送入响应 Schema；如果只返回 answer，前端将永远收到空比较面板。
+        comparison_fields = _extract_comparison_response_fields(primary_data)
 
         # ---- Step 7：更新上下文 ----
         # 从工具结果中提取 referenced_entities
@@ -363,6 +408,7 @@ class ReportAssistantService:
             evidence=composed.get("evidence", []),
             suggested_follow_ups=composed.get("suggested_follow_ups", []),
             data_quality=primary_tool.data_quality,
+            **comparison_fields,
         )
 
     # ------------------------------------------------------------------
@@ -696,6 +742,9 @@ class ReportAssistantService:
         evidence: Optional[list[EvidenceItem]] = None,
         suggested_follow_ups: Optional[list[str]] = None,
         data_quality: Optional[dict] = None,
+        comparison_period: Optional[ComparisonPeriod] = None,
+        metric_comparisons: Optional[list[MetricComparison]] = None,
+        comparison_data_quality: Optional[ComparisonDataQuality] = None,
         error_code: Optional[str] = None,
     ) -> ReportAssistantMessageResponse:
         """构建标准响应对象。"""
@@ -713,6 +762,9 @@ class ReportAssistantService:
             suggested_follow_ups=suggested_follow_ups or [],
             conversation_context=context,
             data_quality=data_quality,
+            comparison_period=comparison_period,
+            metric_comparisons=metric_comparisons or [],
+            comparison_data_quality=comparison_data_quality,
             error_code=error_code,
         )
 

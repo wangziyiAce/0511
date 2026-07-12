@@ -105,6 +105,13 @@ class ReportIntentParser:
                         # 置信度的主观低估不应阻断明确追问，因此提升到安全执行阈值。
                         plan.confidence = max(plan.confidence, settings.confidence_high)
                         plan.requires_clarification = False
+                # DeepSeek 能稳定识别“周期比较”意图，但有时省略明显的报告类型。
+                # 这里只从受控目录关键词中补齐唯一命中值，不能让模型自造类型。
+                if plan.intent == ReportAssistantIntent.COMPARE_REPORTS and not plan.report_type:
+                    inferred_type = _infer_unique_report_type(message, allowed_report_types)
+                    if inferred_type:
+                        plan.report_type = inferred_type
+                        plan.assumptions.append("Python 根据报告目录关键词补齐比较报告类型")
                 return plan
             except Exception as exc:
                 logger.warning("LLM 意图解析失败，降级到关键词路由: %s", exc)
@@ -297,21 +304,28 @@ def _build_intent_system_prompt(
         "8. 问'老板能看懂的周报'、'经营周报' → report_type=weekly_summary。\n"
         "9. 问'哪个渠道最不划算'、'投放效果' → report_type=channel_roi。\n"
         "10. 问'销售转化'、'漏斗' → report_type=sales_funnel。\n"
+        "11. 用户要求查看某类报告、分析或了解某一类报告，且没有指定已有 report_id，"
+        "按 generate_report 处理；例如'看看现在的申请风险'。\n"
+        "12. 同一种报告的两个时间周期对比 → intent=compare_reports，并分别填写 "
+        "relative_period 和 comparison_relative_period。\n"
+        "13. 两种不同报告之间的关联分析 → intent=cross_report_analysis；只能识别意图，"
+        "不能自行给出因果结论。\n"
     )
 
 
 def _build_intent_user_prompt(message: str) -> str:
     """构建 User Prompt — 包含用户原始输入和当前时间上下文。"""
     now = datetime.now()
+    supported_intents = " / ".join(intent.value for intent in ReportAssistantIntent)
     return (
         f"当前时间：{now.strftime('%Y年%m月%d日 %H:%M')}（{_weekday_cn(now.weekday())}）\n\n"
         f"用户输入：{message}\n\n"
         "请输出一个 JSON 对象，包含以下字段：\n"
-        "- intent: 意图类型。完整列表：generate_report / query_report_status / drill_down / "
-        "explain_risk / explain_metric / query_data_quality / unknown\n"
+        f"- intent: 意图类型。完整列表：{supported_intents}\n"
         "- report_type: 报告类型编码（必须来自白名单，不确定则为 null）\n"
         "- report_id: 如果用户指定了报告 ID 则为数字，否则为 null\n"
         "- relative_period: 相对时间关键词（从用户输入中提取，无则为 null）\n"
+        "- comparison_relative_period: 周期对比的另一个相对时间关键词，无则为 null\n"
         "- confidence: 置信度 [0.0, 1.0]\n"
         "- requires_clarification: 是否需要用户澄清\n"
         "- clarification_question: 如果需要澄清，具体问题\n"
@@ -325,6 +339,9 @@ def _build_intent_user_prompt(message: str) -> str:
         "- 问'为什么这么高'/'为什么风险高' → explain_risk\n"
         "- 问'怎么算的'/'计算规则' → explain_metric\n"
         "- 问'数据可靠吗'/'数据质量' → query_data_quality\n"
+        "- 问'本周和上周相比'/'对比两个周期' → compare_reports\n"
+        "- 问两种不同报告是否有关联 → cross_report_analysis\n"
+        "- 查看、分析某类报告且没有已有 report_id → generate_report\n"
         "- 创建新报告 → generate_report\n"
     )
 
@@ -360,6 +377,33 @@ _CROSS_REPORT_KEYWORDS: list[str] = [
     "一起分析", "有没有关联", "是不是因为", "有没有关系",
     "关联分析", "一起看", "同时看", "和.*一起",
 ]
+
+
+def _infer_unique_report_type(
+    message: str,
+    report_types: list[ReportTypeOption],
+) -> Optional[str]:
+    """从受控报告目录中推断唯一的报告类型。
+
+    Args:
+        message: 用户原始问题，只用于匹配目录内的中文业务关键词。
+        report_types: 当前服务端构建的报告目录，禁止接受目录外类型。
+
+    Returns:
+        唯一最高分的报告类型；没有命中或最高分并列时返回 ``None``，交给澄清流程。
+    """
+
+    normalized = message.lower()
+    scored = [
+        (option.report_type, sum(1 for keyword in option.keywords if keyword.lower() in normalized))
+        for option in report_types
+    ]
+    matched = sorted((item for item in scored if item[1] > 0), key=lambda item: item[1], reverse=True)
+    if not matched:
+        return None
+    if len(matched) > 1 and matched[0][1] == matched[1][1]:
+        return None
+    return matched[0][0]
 
 
 def _detect_multi_turn_intent_keywords(
@@ -409,7 +453,7 @@ def _extract_plan_from_llm_response(content: str) -> ReportRequestPlan:
     # 只取白名单字段，忽略 LLM 可能输出的额外字段
     allowed_fields = {
         "intent", "report_type", "report_id", "entity_id",
-        "relative_period", "period_start", "period_end",
+        "relative_period", "comparison_relative_period", "period_start", "period_end",
         "risk_level", "priority", "focus_metrics", "target_role",
         "output_style", "need_actions", "requires_clarification",
         "clarification_question", "assumptions", "confidence",
